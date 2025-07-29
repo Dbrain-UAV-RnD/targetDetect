@@ -1,24 +1,15 @@
-"""
-영상처리에 필요한 라이브러리리
-"""
 import cv2
 import numpy as np
-import gi
-
-
-"""
-데이터 송수신 처리를 위한 라이브러리리
-"""
 import socket
 import threading
 import struct
 import time
 import serial
+import gi
 
-
-# import os
-# os.environ['PATH'] = r'C:\gstreamer\1.0\msvc_x86_64\bin' + os.pathsep + os.environ['PATH']
-# os.environ['GST_PLUGIN_PATH'] = r'C:\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0'
+import os
+os.environ['PATH'] = r'C:\gstreamer\1.0\msvc_x86_64\bin' + os.pathsep + os.environ['PATH']
+os.environ['GST_PLUGIN_PATH'] = r'C:\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0'
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
@@ -61,17 +52,17 @@ def camera_init(capture, resolution_index=0):
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
     capture.set(cv2.CAP_PROP_FPS, 25)
 
-    # fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
-    # width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
-    # height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    # fps = capture.get(cv2.CAP_PROP_FPS)
+    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
+    width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    fps = capture.get(cv2.CAP_PROP_FPS)
 
     return True
 
 def setup_serial():
     try:
         ser = serial.Serial(
-            port='COM9',
+            port='/dev/ttyTHS1',
             baudrate=57600,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
@@ -82,9 +73,6 @@ def setup_serial():
     except Exception as e:
         return None
 
-"""
-시리얼 데이터 송신
-"""
 def send_data_to_serial(x, y, is_tracking):
     global serial_port
     
@@ -113,11 +101,14 @@ def send_data_to_serial(x, y, is_tracking):
         except:
             pass
 
-"""
-UDP 데이터 수신
-"""
 def udp_receiver():
     global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center
+    
+    # 이전 값을 저장하기 위한 변수들 추가
+    prev_x = None
+    prev_y = None
+    prev_target_selected = None
+    prev_zoom_cmd = None
     
     max_retries = 30
     retry_count = 0
@@ -126,7 +117,7 @@ def udp_receiver():
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            udp_socket.bind(('0.0.0.0', 5001))
+            udp_socket.bind(('192.168.10.219', 5001))
             break
         except Exception as e:
             retry_count += 1
@@ -147,6 +138,17 @@ def udp_receiver():
             y = struct.unpack('<H', data[4:6])[0]
             is_target_selected = data[6] == 0xFF
             zoom_cmd = data[7]
+            
+            # 값이 이전과 같은지 확인
+            if (x == prev_x and y == prev_y and 
+                is_target_selected == prev_target_selected and 
+                zoom_cmd == prev_zoom_cmd):
+                continue  # 이전과 동일한 값이면 처리 건너뛰기
+            
+            # 현재 값을 이전 값으로 저장
+            prev_x, prev_y = x, y
+            prev_target_selected = is_target_selected
+            prev_zoom_cmd = zoom_cmd
             
             orig_x, orig_y = x, y
             
@@ -178,19 +180,15 @@ def udp_receiver():
     finally:
         udp_socket.close()
 
-"""
-트레킹 영역을 설정 및 수행
-칼만으로 KCF 보정
-"""
 def process_new_coordinate(frame):
-    global latest_point, new_point_received, tracker, tracking, roi, current_frame, kalman
+    global latest_point, new_point_received, tracker, tracking, roi, current_frame, kalman, zoom_level
     if new_point_received:
         new_point_received = False
         x, y = latest_point
         current_frame = frame.copy()
         
         if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-            roi_size = 100
+            roi_size = int(100 / zoom_level)
             left = max(0, x - roi_size // 2)
             top = max(0, y - roi_size // 2)
             right = min(frame.shape[1], x + roi_size // 2)
@@ -244,18 +242,15 @@ def main():
     if not camera_init(cap):
         exit()
     
-    """
-    GStreamer 파이프라인
-    """
     pipeline_str = (
         "appsrc name=source is-live=true format=3 do-timestamp=true ! "
-        "video/x-raw,format=BGR,width=1280,height=720,framerate=25/1 ! "
+        "video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! "
         "videoconvert ! video/x-raw ! "
         "x264enc bitrate=6000 tune=zerolatency speed-preset=superfast key-int-max=1 ! "
         "h264parse ! "
         "rtph264pay config-interval=1 ! "
-        "queue max-size-buffers=600 max-size-time=0 max-size-bytes=0 ! "
-        "udpsink host=127.0.0.1 port=10010 buffer-size=2097152 sync=true async=false"
+        "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
+        "udpsink host=192.168.10.219 port=10010 buffer-size=2097152 sync=true async=false"
     )
 
     pipeline = Gst.parse_launch(pipeline_str)
@@ -393,23 +388,26 @@ def main():
                 disp_pred_x, disp_pred_y = original_to_display_coord(pred_x, pred_y)
                 cv2.circle(display_frame, (disp_pred_x, disp_pred_y), 5, (255, 0, 0), -1)
                 
-                current_time = time.time()
-                if current_time - last_serial_time >= serial_interval:
-                    send_data_to_serial(center_x, center_y, tracking)
-                    last_serial_time = current_time
+                # serial limit
+                # current_time = time.time()
+                # if current_time - last_serial_time >= serial_interval:
+                #     send_data_to_serial(center_x, center_y, tracking)
+                #     last_serial_time = current_time
+                
+                send_data_to_serial(center_x, center_y, tracking)
             
             status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
             cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if tracking else (0, 0, 255), 2)
             target_status = "Target Selected" if target_selected else "No Target"
             cv2.putText(display_frame, target_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if target_selected else (0, 0, 255), 2)
-            cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
             # if zoom_center is not None:
             #     if 'original_to_display_coord' in locals():
             #         disp_zoom_x, disp_zoom_y = original_to_display_coord(*zoom_center)
             #         cv2.circle(display_frame, (disp_zoom_x, disp_zoom_y), 8, (255, 255, 0), -1)
             #         cv2.putText(display_frame, f"Zoom Center: {zoom_center} -> ({disp_zoom_x}, {disp_zoom_y})", 
-            #                     (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            #                     (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
             if zoom_applied and tracking:
                 disp_x, disp_y = original_to_display_coord(int(center_x), int(center_y))
@@ -417,10 +415,10 @@ def main():
                 # test_x, test_y = local_display_to_original_coord(disp_x, disp_y)
                 
                 debug_info = f"Orig: ({int(center_x)}, {int(center_y)}) -> Disp: ({disp_x}, {disp_y})"
-                cv2.putText(display_frame, debug_info, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.putText(display_frame, debug_info, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
                 # conversion_test = f"Back conversion test: ({disp_x}, {disp_y}) -> ({test_x}, {test_y})"
-                # cv2.putText(display_frame, conversion_test, (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                # cv2.putText(display_frame, conversion_test, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
             
             buffer = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
             buffer.fill(0, display_frame.tobytes())
