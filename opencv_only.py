@@ -6,10 +6,10 @@ import struct
 import time
 import serial
 import gi
-
 import os
-os.environ['PATH'] = r'C:\gstreamer\1.0\msvc_x86_64\bin' + os.pathsep + os.environ['PATH']
-os.environ['GST_PLUGIN_PATH'] = r'C:\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0'
+
+# Set GStreamer plugin path
+os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
@@ -250,7 +250,7 @@ def main():
         "h264parse ! "
         "rtph264pay config-interval=1 ! "
         "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
-        "udpsink host=192.168.10.219 port=10010 buffer-size=2097152 sync=true async=false"
+        "udpsink host=192.168.10.204 port=10010 buffer-size=2097152 sync=true async=false"
     )
 
     pipeline = Gst.parse_launch(pipeline_str)
