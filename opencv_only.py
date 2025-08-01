@@ -29,6 +29,11 @@ zoom_command = None
 zoom_center = None
 center_x = 0
 center_y = 0
+prev_center_x = 0
+prev_center_y = 0
+velocity_x = 0
+velocity_y = 0
+tracker_fail_count = 0
 
 def camera_init(capture, resolution_index=0):
     if capture.isOpened():
@@ -182,7 +187,7 @@ def udp_receiver():
         udp_socket.close()
 
 def process_new_coordinate(frame):
-    global latest_point, new_point_received, tracker, tracking, roi, current_frame, zoom_level, center_x, center_y
+    global latest_point, new_point_received, tracker, tracking, roi, current_frame, zoom_level, center_x, center_y, prev_center_x, prev_center_y, velocity_x, velocity_y, tracker_fail_count
     if new_point_received:
         new_point_received = False
         x, y = latest_point
@@ -198,6 +203,13 @@ def process_new_coordinate(frame):
             
             center_x = left + (right - left) / 2
             center_y = top + (bottom - top) / 2
+            
+            # 초기화 시 속도와 이전 위치 리셋
+            prev_center_x = center_x
+            prev_center_y = center_y
+            velocity_x = 0
+            velocity_y = 0
+            tracker_fail_count = 0
             
             tracker = cv2.TrackerCSRT_create()
             tracker.init(frame, roi)
@@ -298,8 +310,33 @@ def main():
                     if success:
                         x, y, w, h = [int(v) for v in bbox]
                         roi = (x, y, w, h)
+                        
+                        # 이전 중심점 저장
+                        prev_center_x = center_x
+                        prev_center_y = center_y
+                        
+                        # 새로운 중심점 계산
                         center_x = x + w / 2
                         center_y = y + h / 2
+                        
+                        # 속도 계산 (3프레임 동안의 이동)
+                        velocity_x = (center_x - prev_center_x) / 3
+                        velocity_y = (center_y - prev_center_y) / 3
+                        
+                        tracker_fail_count = 0
+                    else:
+                        # 트래커 실패 시 예측된 위치로 이동
+                        center_x += velocity_x * 3
+                        center_y += velocity_y * 3
+                        tracker_fail_count += 1
+                        
+                        # 5번 이상 실패하면 트래킹 중지
+                        if tracker_fail_count > 5:
+                            tracking = False
+                else:
+                    # 중간 프레임에서는 선형 보간으로 위치 예측
+                    center_x += velocity_x
+                    center_y += velocity_y
             
             display_frame = original_frame.copy()
             
