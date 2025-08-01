@@ -20,7 +20,6 @@ current_frame = None
 roi = None
 tracker = None
 tracking = False
-kalman = None
 latest_point = None
 new_point_received = False
 target_selected = False
@@ -181,7 +180,7 @@ def udp_receiver():
         udp_socket.close()
 
 def process_new_coordinate(frame):
-    global latest_point, new_point_received, tracker, tracking, roi, current_frame, kalman, zoom_level
+    global latest_point, new_point_received, tracker, tracking, roi, current_frame, zoom_level
     if new_point_received:
         new_point_received = False
         x, y = latest_point
@@ -195,25 +194,14 @@ def process_new_coordinate(frame):
             bottom = min(frame.shape[0], y + roi_size // 2)
             roi = (left, top, right - left, bottom - top)
             
-            tracker = cv2.TrackerKCF_create()
+            tracker = cv2.TrackerCSRT_create()
             tracker.init(frame, roi)
             tracking = True
-            
-            kalman = cv2.KalmanFilter(4, 2)
-            kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
-            kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
-            kalman.processNoiseCov = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32) * 0.03
-            kalman.measurementNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * 0.1
-
-            center_x = left + (right - left) / 2
-            center_y = top + (bottom - top) / 2
-            kalman.statePre = np.array([[center_x], [center_y], [0], [0]], np.float32)
-            kalman.statePost = np.array([[center_x], [center_y], [0], [0]], np.float32)
         else:
             pass
 
 def main():
-    global current_frame, tracker, tracking, roi, target_selected, kalman, serial_port, zoom_level, zoom_command, zoom_center
+    global current_frame, tracker, tracking, roi, target_selected, serial_port, zoom_level, zoom_command, zoom_center
     
     serial_port = setup_serial()
     
@@ -269,10 +257,12 @@ def main():
     serial_interval = 1.0 / 25.0
     
     original_frame = None
+    frame_counter = 0
 
     try:
         while True:
             ret, frame = cap.read()
+            frame_counter += 1
             
             if not ret:
                 time.sleep(0.1)
@@ -290,28 +280,21 @@ def main():
             
             current_frame = original_frame.copy()
             
-            process_new_coordinate(original_frame)
+            if frame_counter % 3 == 0:
+                process_new_coordinate(original_frame)
             
             center_x, center_y = 0, 0
-            pred_x, pred_y = 0, 0
             
             if not target_selected:
                 tracking = False
 
-            if tracking and tracker is not None and kalman is not None:
-                prediction = kalman.predict()
-                pred_x, pred_y = int(prediction[0]), int(prediction[1])
-
+            if tracking and tracker is not None and frame_counter % 3 == 0:
                 success, bbox = tracker.update(original_frame)
                 if success:
                     x, y, w, h = [int(v) for v in bbox]
                     roi = (x, y, w, h)
                     center_x = x + w / 2
                     center_y = y + h / 2
-                    measurement = np.array([[np.float32(center_x)], [np.float32(center_y)]])
-                    kalman.correct(measurement)
-                else:
-                    center_x, center_y = pred_x, pred_y
             
             display_frame = original_frame.copy()
             
@@ -384,9 +367,6 @@ def main():
                 
                 disp_center_x, disp_center_y = original_to_display_coord(int(center_x), int(center_y))
                 cv2.circle(display_frame, (disp_center_x, disp_center_y), 5, (0, 0, 255), -1)
-                
-                disp_pred_x, disp_pred_y = original_to_display_coord(pred_x, pred_y)
-                cv2.circle(display_frame, (disp_pred_x, disp_pred_y), 5, (255, 0, 0), -1)
                 
                 # serial limit
                 # current_time = time.time()
