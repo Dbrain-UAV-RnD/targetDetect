@@ -27,7 +27,7 @@ class RobustPitchTracker:
         self.center = None
         
         # Tracking parameters
-        self.search_scale = 8
+        self.search_scale = 3.0
         self.confidence_threshold = 0.2  # Low threshold setting
         self.template_update_rate = 0.05
         
@@ -200,7 +200,7 @@ class RobustPitchTracker:
             print(f"Pitch down detected: {y_movement} pixels")
             # More aggressive tracking during pitch down
             self.confidence_threshold = 0.1
-            self.search_scale = 6.0
+            self.search_scale = 4.0
             self.velocity_decay = 0.9  # Reduce decay to maintain momentum
         else:
             # Return to normal state
