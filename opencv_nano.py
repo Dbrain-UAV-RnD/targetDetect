@@ -1,5 +1,4 @@
 import cv2
-import numpy as np
 import socket
 import threading
 import struct
@@ -8,7 +7,6 @@ import serial
 import gi
 import os
 
-# Set GStreamer plugin path
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
 
 gi.require_version('Gst', '1.0')
@@ -17,52 +15,41 @@ from gi.repository import Gst
 Gst.init(None)
 
 class RobustPitchTracker:
-    """Robust tracker for rapid pitch down movements"""
     
     def __init__(self):
-        # Basic settings
         self.template = None
         self.template_gray = None
         self.bbox = None
         self.center = None
         
-        # Tracking parameters
         self.search_scale = 3.0
-        self.confidence_threshold = 0.2  # Low threshold setting
+        self.confidence_threshold = 0.2
         self.template_update_rate = 0.05
         
-        # Rapid movement handling
-        self.max_movement_ratio = 0.5  # Allow movement up to 50% of template size per frame
+        self.max_movement_ratio = 0.5
         self.velocity_x = 0
         self.velocity_y = 0
-        self.velocity_decay = 0.8  # Velocity decay
+        self.velocity_decay = 0.8
         
-        # Failure handling
         self.failed_frames = 0
-        self.max_failed_frames = 10  # More lenient setting
+        self.max_failed_frames = 10
         
-        # Pitch down detection
         self.prev_center_y = 0
-        self.pitch_down_threshold = 50  # Consider pitch down if moving 50+ pixels down per frame
+        self.pitch_down_threshold = 50
         
     def simple_roi_selection(self, frame, point, roi_size=100):
-        """Simple and reliable ROI selection"""
         x, y = int(point[0]), int(point[1])
         
-        # Square ROI centered on click point
         half_size = roi_size // 2
         
-        # Boundary check
         x1 = max(0, x - half_size)
         y1 = max(0, y - half_size)
         x2 = min(frame.shape[1], x + half_size)
         y2 = min(frame.shape[0], y + half_size)
         
-        # Calculate actual size
         actual_w = x2 - x1
         actual_h = y2 - y1
         
-        # Ensure minimum size
         if actual_w < 60 or actual_h < 60:
             roi_size = 60
             half_size = roi_size // 2
@@ -74,20 +61,15 @@ class RobustPitchTracker:
         return (x1, y1, actual_w, actual_h)
     
     def init(self, frame, point):
-        """Initialize tracker"""
-        # Simple ROI selection
         self.bbox = self.simple_roi_selection(frame, point)
         x, y, w, h = self.bbox
         
-        # Extract template
         self.template = frame[y:y+h, x:x+w].copy()
         self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
         
-        # Set center point
         self.center = [x + w//2, y + h//2]
         self.prev_center_y = self.center[1]
         
-        # Initialize velocity
         self.velocity_x = 0
         self.velocity_y = 0
         self.failed_frames = 0
@@ -96,24 +78,20 @@ class RobustPitchTracker:
         return True
     
     def update(self, frame):
-        """Update tracker - considering rapid pitch down"""
         if self.template is None or self.template_gray is None:
             return False, self.bbox
         
-        # Velocity-based predicted position
         predicted_x = self.center[0] + self.velocity_x
         predicted_y = self.center[1] + self.velocity_y
         
-        # Set search area - very wide
         template_w, template_h = self.template.shape[1], self.template.shape[0]
         search_w = int(template_w * self.search_scale)
         search_h = int(template_h * self.search_scale)
         
-        # Expand search area downward considering rapid downward movement
         search_x1 = max(0, int(predicted_x - search_w // 2))
-        search_y1 = max(0, int(predicted_y - search_h // 4))  # Only 1/4 upward
+        search_y1 = max(0, int(predicted_y - search_h // 4))
         search_x2 = min(frame.shape[1], search_x1 + search_w)
-        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 1.5))  # 1.5x downward
+        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 1.5))
         
         search_region = frame[search_y1:search_y2, search_x1:search_x2]
         
@@ -121,18 +99,15 @@ class RobustPitchTracker:
             self.failed_frames += 1
             return self.failed_frames <= self.max_failed_frames, self.bbox
         
-        # Convert to grayscale
         search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
         
-        # Template matching with multiple scales
         best_score = -1
         best_loc = None
         best_scale = 1.0
         
-        scales = [0.8, 0.9, 1.0, 1.1, 1.2]  # Wider scale range
+        scales = [0.8, 0.9, 1.0, 1.1, 1.2]
         
         for scale in scales:
-            # Resize template
             scaled_w = int(self.template_gray.shape[1] * scale)
             scaled_h = int(self.template_gray.shape[0] * scale)
             
@@ -141,7 +116,6 @@ class RobustPitchTracker:
                 
             scaled_template = cv2.resize(self.template_gray, (scaled_w, scaled_h))
             
-            # Template matching
             result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
             
@@ -150,24 +124,19 @@ class RobustPitchTracker:
                 best_loc = max_loc
                 best_scale = scale
         
-        # Confidence check
         if best_score < self.confidence_threshold:
             self.failed_frames += 1
             
-            # Velocity-based position prediction (considering rapid pitch down)
             if self.failed_frames <= self.max_failed_frames:
-                # Apply pitch down acceleration
-                if self.velocity_y > 0:  # If moving downward
-                    self.velocity_y *= 1.2  # Accelerate
+                if self.velocity_y > 0:
+                    self.velocity_y *= 1.2
                 
                 self.center[0] += self.velocity_x
                 self.center[1] += self.velocity_y
                 
-                # Boundary check
                 self.center[0] = max(template_w//2, min(self.center[0], frame.shape[1] - template_w//2))
                 self.center[1] = max(template_h//2, min(self.center[1], frame.shape[0] - template_h//2))
                 
-                # Update bounding box
                 self.bbox = (
                     int(self.center[0] - template_w//2),
                     int(self.center[1] - template_h//2),
@@ -180,43 +149,34 @@ class RobustPitchTracker:
                 print(f"Tracking failed: confidence={best_score:.3f}")
                 return False, self.bbox
         
-        # Successful matching
         self.failed_frames = 0
         
-        # Calculate new position
         template_w_scaled = int(self.template_gray.shape[1] * best_scale)
         template_h_scaled = int(self.template_gray.shape[0] * best_scale)
         
         new_center_x = search_x1 + best_loc[0] + template_w_scaled // 2
         new_center_y = search_y1 + best_loc[1] + template_h_scaled // 2
         
-        # Calculate velocity
         self.velocity_x = new_center_x - self.center[0]
         self.velocity_y = new_center_y - self.center[1]
         
-        # Detect pitch down
         y_movement = new_center_y - self.prev_center_y
         if y_movement > self.pitch_down_threshold:
             print(f"Pitch down detected: {y_movement} pixels")
-            # More aggressive tracking during pitch down
             self.confidence_threshold = 0.2
             self.search_scale = 4.0
         else:
-            # Return to normal state
             self.confidence_threshold = 0.3
             self.search_scale = 3.0
         
         self.prev_center_y = new_center_y
         
-        # Update center point
         self.center[0] = new_center_x
         self.center[1] = new_center_y
         
-        # Velocity decay
         self.velocity_x *= self.velocity_decay
         self.velocity_y *= self.velocity_decay
         
-        # Update bounding box
         new_w = int(template_w_scaled)
         new_h = int(template_h_scaled)
         
@@ -227,7 +187,6 @@ class RobustPitchTracker:
             new_h
         )
         
-        # Template update (only when high confidence)
         if best_score > 0.6:
             x, y, w, h = self.bbox
             if 0 <= x < frame.shape[1] - w and 0 <= y < frame.shape[0] - h:
@@ -242,7 +201,6 @@ class RobustPitchTracker:
         
         return True, self.bbox
 
-# Global variables
 current_frame = None
 tracker = None
 tracking = False
@@ -526,7 +484,6 @@ def main():
             
             display_frame = original_frame.copy()
             
-            # Zoom handling
             zoom_x1, zoom_y1 = 0, 0
             zoom_applied = False
             
@@ -592,12 +549,10 @@ def main():
                 disp_w = disp_x2 - disp_x
                 disp_h = disp_y2 - disp_y
                 
-                # Bounding box
                 cv2.rectangle(display_frame, (disp_x, disp_y), (disp_x + disp_w, disp_y + disp_h), (0, 255, 0), 2)
                 
                 send_data_to_serial(center_x, center_y, tracking)
             
-            # Status information
             status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
             cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if tracking else (0, 0, 255), 2)
             
