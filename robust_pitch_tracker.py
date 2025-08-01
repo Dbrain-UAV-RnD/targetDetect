@@ -27,7 +27,7 @@ class RobustPitchTracker:
         self.center = None
         
         # Tracking parameters
-        self.search_scale = 5.0  # Expand search area to 3x template size
+        self.search_scale = 10.0  # Expand search area to 3x template size
         self.confidence_threshold = 0.3  # Low threshold setting
         self.template_update_rate = 0.05
         
