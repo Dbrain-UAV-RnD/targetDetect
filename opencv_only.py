@@ -303,6 +303,12 @@ def main():
             
             if not target_selected:
                 tracking = False
+                center_x = 0
+                center_y = 0
+                prev_center_x = 0 
+                prev_center_y = 0
+                velocity_x = 0
+                velocity_y = 0
 
             if tracking and tracker is not None:
                 if frame_counter % 3 == 0:
@@ -320,8 +326,13 @@ def main():
                         center_y = y + h / 2
                         
                         # 속도 계산 (3프레임 동안의 이동)
-                        velocity_x = (center_x - prev_center_x) / 3
-                        velocity_y = (center_y - prev_center_y) / 3
+                        # 첫 프레임이거나 이전 위치가 0인 경우 속도를 0으로 설정
+                        if prev_center_x != 0 and prev_center_y != 0:
+                            velocity_x = (center_x - prev_center_x) / 3
+                            velocity_y = (center_y - prev_center_y) / 3
+                        else:
+                            velocity_x = 0
+                            velocity_y = 0
                         
                         tracker_fail_count = 0
                     else:
