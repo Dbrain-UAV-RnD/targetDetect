@@ -6,7 +6,6 @@ import time
 import serial
 import gi
 import os
-import numpy as np
 
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
 
@@ -38,10 +37,6 @@ class RobustPitchTracker:
         self.prev_center_y = 0
         self.pitch_down_threshold = 50
         
-        # 빠른 움직임 감지용
-        self.high_velocity_threshold = 30  # 픽셀
-        self.is_fast_motion = False
-    
     def simple_roi_selection(self, frame, point, roi_size=100):
         x, y = int(point[0]), int(point[1])
         
@@ -78,7 +73,6 @@ class RobustPitchTracker:
         self.velocity_x = 0
         self.velocity_y = 0
         self.failed_frames = 0
-        self.is_fast_motion = False
         
         print(f"Tracker initialized at {self.center} with bbox {self.bbox}")
         return True
@@ -87,26 +81,12 @@ class RobustPitchTracker:
         if self.template is None or self.template_gray is None:
             return False, self.bbox
         
-        # 속도 기반 빠른 움직임 감지
-        velocity_magnitude = np.sqrt(self.velocity_x**2 + self.velocity_y**2)
-        self.is_fast_motion = velocity_magnitude > self.high_velocity_threshold
-        
-        # 빠른 움직임일 때 파라미터 조정
-        if self.is_fast_motion:
-            adaptive_confidence_threshold = 0.15  # 더 낮은 임계값
-            adaptive_search_scale = 4.5  # 더 큰 검색 영역
-            velocity_multiplier = 1.2  # 속도 예측 강화
-        else:
-            adaptive_confidence_threshold = self.confidence_threshold
-            adaptive_search_scale = self.search_scale
-            velocity_multiplier = 1.0
-        
-        predicted_x = self.center[0] + self.velocity_x * velocity_multiplier
-        predicted_y = self.center[1] + self.velocity_y * velocity_multiplier
+        predicted_x = self.center[0] + self.velocity_x
+        predicted_y = self.center[1] + self.velocity_y
         
         template_w, template_h = self.template.shape[1], self.template.shape[0]
-        search_w = int(template_w * adaptive_search_scale)
-        search_h = int(template_h * adaptive_search_scale)
+        search_w = int(template_w * self.search_scale)
+        search_h = int(template_h * self.search_scale)
         
         search_x1 = max(0, int(predicted_x - search_w // 2))
         search_y1 = max(0, int(predicted_y - search_h // 4))
@@ -125,8 +105,7 @@ class RobustPitchTracker:
         best_loc = None
         best_scale = 1.0
         
-        # 빠른 움직임일 때만 더 많은 스케일 테스트
-        scales = [0.8, 0.9, 1.0, 1.1, 1.2] if not self.is_fast_motion else [0.7, 0.85, 1.0, 1.15, 1.3]
+        scales = [0.8, 0.9, 1.0, 1.1, 1.2]
         
         for scale in scales:
             scaled_w = int(self.template_gray.shape[1] * scale)
@@ -145,14 +124,12 @@ class RobustPitchTracker:
                 best_loc = max_loc
                 best_scale = scale
         
-        if best_score < adaptive_confidence_threshold:
+        if best_score < self.confidence_threshold:
             self.failed_frames += 1
             
             if self.failed_frames <= self.max_failed_frames:
-                # 빠른 움직임일 때 속도 예측에 더 의존
-                if self.is_fast_motion:
-                    self.velocity_x *= 1.1
-                    self.velocity_y *= 1.1
+                if self.velocity_y > 0:
+                    self.velocity_y *= 1.2
                 
                 self.center[0] += self.velocity_x
                 self.center[1] += self.velocity_y
@@ -210,8 +187,7 @@ class RobustPitchTracker:
             new_h
         )
         
-        # 빠른 움직임이 아니고 매칭 점수가 높을 때만 템플릿 업데이트
-        if best_score > 0.6 and not self.is_fast_motion:
+        if best_score > 0.6:
             x, y, w, h = self.bbox
             if 0 <= x < frame.shape[1] - w and 0 <= y < frame.shape[0] - h:
                 new_template = frame[y:y+h, x:x+w]
@@ -225,7 +201,6 @@ class RobustPitchTracker:
         
         return True, self.bbox
 
-# 나머지 코드는 동일합니다...
 current_frame = None
 tracker = None
 tracking = False
@@ -585,11 +560,6 @@ def main():
             cv2.putText(display_frame, target_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if target_selected else (0, 0, 255), 2)
             
             cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # 빠른 움직임 정보 표시 (디버깅용)
-            if tracking and tracker is not None and tracker.is_fast_motion:
-                motion_status = "Fast Motion Detected"
-                cv2.putText(display_frame, motion_status, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             buffer = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
             buffer.fill(0, display_frame.tobytes())
