@@ -27,6 +27,8 @@ serial_port = None
 zoom_level = 1.0
 zoom_command = None
 zoom_center = None
+center_x = 0
+center_y = 0
 
 def camera_init(capture, resolution_index=0):
     if capture.isOpened():
@@ -180,7 +182,7 @@ def udp_receiver():
         udp_socket.close()
 
 def process_new_coordinate(frame):
-    global latest_point, new_point_received, tracker, tracking, roi, current_frame, zoom_level
+    global latest_point, new_point_received, tracker, tracking, roi, current_frame, zoom_level, center_x, center_y
     if new_point_received:
         new_point_received = False
         x, y = latest_point
@@ -193,6 +195,9 @@ def process_new_coordinate(frame):
             right = min(frame.shape[1], x + roi_size // 2)
             bottom = min(frame.shape[0], y + roi_size // 2)
             roi = (left, top, right - left, bottom - top)
+            
+            center_x = left + (right - left) / 2
+            center_y = top + (bottom - top) / 2
             
             tracker = cv2.TrackerCSRT_create()
             tracker.init(frame, roi)
@@ -283,18 +288,18 @@ def main():
             if frame_counter % 3 == 0:
                 process_new_coordinate(original_frame)
             
-            center_x, center_y = 0, 0
             
             if not target_selected:
                 tracking = False
 
-            if tracking and tracker is not None and frame_counter % 3 == 0:
-                success, bbox = tracker.update(original_frame)
-                if success:
-                    x, y, w, h = [int(v) for v in bbox]
-                    roi = (x, y, w, h)
-                    center_x = x + w / 2
-                    center_y = y + h / 2
+            if tracking and tracker is not None:
+                if frame_counter % 3 == 0:
+                    success, bbox = tracker.update(original_frame)
+                    if success:
+                        x, y, w, h = [int(v) for v in bbox]
+                        roi = (x, y, w, h)
+                        center_x = x + w / 2
+                        center_y = y + h / 2
             
             display_frame = original_frame.copy()
             
