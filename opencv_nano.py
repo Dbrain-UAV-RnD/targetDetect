@@ -38,21 +38,9 @@ class RobustPitchTracker:
         self.prev_center_y = 0
         self.pitch_down_threshold = 50
         
-        # 모션 블러 대응 파라미터
-        self.blur_threshold = 100.0  # 블러 판단 기준값
-        self.prev_blur_score = 1000.0  # 이전 프레임 블러 점수
-        self.blur_adaptive_factor = 1.0  # 블러에 따른 적응 계수
-        
-    def calculate_blur_score(self, image):
-        """Laplacian variance를 사용한 블러 정도 측정"""
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image
-        
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-        score = laplacian.var()
-        return score
+        # 빠른 움직임 감지용
+        self.high_velocity_threshold = 30  # 픽셀
+        self.is_fast_motion = False
     
     def simple_roi_selection(self, frame, point, roi_size=100):
         x, y = int(point[0]), int(point[1])
@@ -84,45 +72,37 @@ class RobustPitchTracker:
         self.template = frame[y:y+h, x:x+w].copy()
         self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
         
-        # 초기 템플릿의 블러 점수 저장
-        self.prev_blur_score = self.calculate_blur_score(self.template)
-        
         self.center = [x + w//2, y + h//2]
         self.prev_center_y = self.center[1]
         
         self.velocity_x = 0
         self.velocity_y = 0
         self.failed_frames = 0
+        self.is_fast_motion = False
         
         print(f"Tracker initialized at {self.center} with bbox {self.bbox}")
-        print(f"Initial blur score: {self.prev_blur_score:.2f}")
         return True
     
     def update(self, frame):
         if self.template is None or self.template_gray is None:
             return False, self.bbox
         
-        # 현재 프레임의 전체적인 블러 정도 확인
-        frame_blur_score = self.calculate_blur_score(frame)
-        blur_ratio = frame_blur_score / max(self.prev_blur_score, 1.0)
+        # 속도 기반 빠른 움직임 감지
+        velocity_magnitude = np.sqrt(self.velocity_x**2 + self.velocity_y**2)
+        self.is_fast_motion = velocity_magnitude > self.high_velocity_threshold
         
-        # 블러 정도에 따른 적응적 파라미터 조정
-        if blur_ratio < 0.5:  # 심한 블러
-            self.blur_adaptive_factor = 2.0
-            adaptive_confidence_threshold = max(0.15, self.confidence_threshold * 0.7)
-            adaptive_search_scale = min(5.0, self.search_scale * 1.5)
-            print(f"Heavy blur detected: blur_ratio={blur_ratio:.2f}")
-        elif blur_ratio < 0.7:  # 중간 블러
-            self.blur_adaptive_factor = 1.5
-            adaptive_confidence_threshold = max(0.18, self.confidence_threshold * 0.85)
-            adaptive_search_scale = min(4.0, self.search_scale * 1.2)
-        else:  # 정상
-            self.blur_adaptive_factor = 1.0
+        # 빠른 움직임일 때 파라미터 조정
+        if self.is_fast_motion:
+            adaptive_confidence_threshold = 0.15  # 더 낮은 임계값
+            adaptive_search_scale = 4.5  # 더 큰 검색 영역
+            velocity_multiplier = 1.2  # 속도 예측 강화
+        else:
             adaptive_confidence_threshold = self.confidence_threshold
             adaptive_search_scale = self.search_scale
+            velocity_multiplier = 1.0
         
-        predicted_x = self.center[0] + self.velocity_x * self.blur_adaptive_factor
-        predicted_y = self.center[1] + self.velocity_y * self.blur_adaptive_factor
+        predicted_x = self.center[0] + self.velocity_x * velocity_multiplier
+        predicted_y = self.center[1] + self.velocity_y * velocity_multiplier
         
         template_w, template_h = self.template.shape[1], self.template.shape[0]
         search_w = int(template_w * adaptive_search_scale)
@@ -141,64 +121,38 @@ class RobustPitchTracker:
         
         search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
         
-        # 블러가 심한 경우 히스토그램 평활화 적용
-        if self.blur_adaptive_factor > 1.5:
-            search_gray = cv2.equalizeHist(search_gray)
-            template_gray_eq = cv2.equalizeHist(self.template_gray)
-        else:
-            template_gray_eq = self.template_gray
-        
         best_score = -1
         best_loc = None
         best_scale = 1.0
         
-        # 블러가 심할수록 더 많은 스케일 테스트
-        if self.blur_adaptive_factor > 1.5:
-            scales = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
-        else:
-            scales = [0.8, 0.9, 1.0, 1.1, 1.2]
+        # 빠른 움직임일 때만 더 많은 스케일 테스트
+        scales = [0.8, 0.9, 1.0, 1.1, 1.2] if not self.is_fast_motion else [0.7, 0.85, 1.0, 1.15, 1.3]
         
         for scale in scales:
-            scaled_w = int(template_gray_eq.shape[1] * scale)
-            scaled_h = int(template_gray_eq.shape[0] * scale)
+            scaled_w = int(self.template_gray.shape[1] * scale)
+            scaled_h = int(self.template_gray.shape[0] * scale)
             
             if scaled_w > search_gray.shape[1] or scaled_h > search_gray.shape[0]:
                 continue
                 
-            scaled_template = cv2.resize(template_gray_eq, (scaled_w, scaled_h))
+            scaled_template = cv2.resize(self.template_gray, (scaled_w, scaled_h))
             
-            # 블러가 심한 경우 SQDIFF_NORMED도 함께 사용
-            if self.blur_adaptive_factor > 1.5:
-                result_ccoeff = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-                result_sqdiff = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_SQDIFF_NORMED)
-                
-                _, max_val_ccoeff, _, max_loc_ccoeff = cv2.minMaxLoc(result_ccoeff)
-                min_val_sqdiff, _, min_loc_sqdiff, _ = cv2.minMaxLoc(result_sqdiff)
-                
-                # 두 방법의 결과를 조합
-                combined_score = max_val_ccoeff * 0.7 + (1 - min_val_sqdiff) * 0.3
-                
-                if combined_score > best_score:
-                    best_score = combined_score
-                    best_loc = max_loc_ccoeff
-                    best_scale = scale
-            else:
-                result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, max_loc = cv2.minMaxLoc(result)
-                
-                if max_val > best_score:
-                    best_score = max_val
-                    best_loc = max_loc
-                    best_scale = scale
+            result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            
+            if max_val > best_score:
+                best_score = max_val
+                best_loc = max_loc
+                best_scale = scale
         
         if best_score < adaptive_confidence_threshold:
             self.failed_frames += 1
             
             if self.failed_frames <= self.max_failed_frames:
-                # 블러가 심할 때는 속도 예측에 더 의존
-                if self.blur_adaptive_factor > 1.0:
-                    self.velocity_x *= (1.1 * self.blur_adaptive_factor)
-                    self.velocity_y *= (1.1 * self.blur_adaptive_factor)
+                # 빠른 움직임일 때 속도 예측에 더 의존
+                if self.is_fast_motion:
+                    self.velocity_x *= 1.1
+                    self.velocity_y *= 1.1
                 
                 self.center[0] += self.velocity_x
                 self.center[1] += self.velocity_y
@@ -215,7 +169,7 @@ class RobustPitchTracker:
                 
                 return True, self.bbox
             else:
-                print(f"Tracking failed: confidence={best_score:.3f}, blur_factor={self.blur_adaptive_factor:.1f}")
+                print(f"Tracking failed: confidence={best_score:.3f}")
                 return False, self.bbox
         
         self.failed_frames = 0
@@ -256,22 +210,18 @@ class RobustPitchTracker:
             new_h
         )
         
-        # 블러가 적고 매칭 점수가 높을 때만 템플릿 업데이트
-        if best_score > 0.6 and self.blur_adaptive_factor < 1.2:
+        # 빠른 움직임이 아니고 매칭 점수가 높을 때만 템플릿 업데이트
+        if best_score > 0.6 and not self.is_fast_motion:
             x, y, w, h = self.bbox
             if 0 <= x < frame.shape[1] - w and 0 <= y < frame.shape[0] - h:
                 new_template = frame[y:y+h, x:x+w]
                 if new_template.size > 0:
-                    # 새 템플릿의 블러 확인
-                    new_blur_score = self.calculate_blur_score(new_template)
-                    if new_blur_score > self.prev_blur_score * 0.7:  # 너무 블러가 심하지 않을 때만
-                        self.template = cv2.addWeighted(
-                            self.template, 1 - self.template_update_rate,
-                            cv2.resize(new_template, (self.template.shape[1], self.template.shape[0])),
-                            self.template_update_rate, 0
-                        )
-                        self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
-                        self.prev_blur_score = self.calculate_blur_score(self.template)
+                    self.template = cv2.addWeighted(
+                        self.template, 1 - self.template_update_rate,
+                        cv2.resize(new_template, (self.template.shape[1], self.template.shape[0])),
+                        self.template_update_rate, 0
+                    )
+                    self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
         
         return True, self.bbox
 
@@ -636,10 +586,10 @@ def main():
             
             cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
-            # 블러 정보 표시 (디버깅용)
-            if tracking and tracker is not None:
-                blur_status = f"Blur Factor: {tracker.blur_adaptive_factor:.1f}"
-                cv2.putText(display_frame, blur_status, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            # 빠른 움직임 정보 표시 (디버깅용)
+            if tracking and tracker is not None and tracker.is_fast_motion:
+                motion_status = "Fast Motion Detected"
+                cv2.putText(display_frame, motion_status, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             buffer = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
             buffer.fill(0, display_frame.tobytes())
