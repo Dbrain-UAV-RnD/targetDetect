@@ -17,52 +17,52 @@ from gi.repository import Gst
 Gst.init(None)
 
 class RobustPitchTracker:
-    """급격한 피치 다운에 강한 추적기"""
+    """Robust tracker for rapid pitch down movements"""
     
     def __init__(self):
-        # 기본 설정
+        # Basic settings
         self.template = None
         self.template_gray = None
         self.bbox = None
         self.center = None
         
-        # 추적 파라미터
-        self.search_scale = 3.0  # 검색 영역을 템플릿의 3배로 확대
-        self.confidence_threshold = 0.3  # 낮은 임계값으로 설정
+        # Tracking parameters
+        self.search_scale = 3.0  # Expand search area to 3x template size
+        self.confidence_threshold = 0.3  # Low threshold setting
         self.template_update_rate = 0.05
         
-        # 급격한 움직임 대응
-        self.max_movement_ratio = 0.5  # 한 프레임에 템플릿 크기의 50%까지 이동 허용
+        # Rapid movement handling
+        self.max_movement_ratio = 0.5  # Allow movement up to 50% of template size per frame
         self.velocity_x = 0
         self.velocity_y = 0
-        self.velocity_decay = 0.8  # 속도 감쇄
+        self.velocity_decay = 0.8  # Velocity decay
         
-        # 실패 처리
+        # Failure handling
         self.failed_frames = 0
-        self.max_failed_frames = 10  # 더 관대하게 설정
+        self.max_failed_frames = 10  # More lenient setting
         
-        # 피치 다운 감지
+        # Pitch down detection
         self.prev_center_y = 0
-        self.pitch_down_threshold = 50  # 한 프레임에 50픽셀 이상 아래로 이동시 피치 다운으로 판단
+        self.pitch_down_threshold = 50  # Consider pitch down if moving 50+ pixels down per frame
         
     def simple_roi_selection(self, frame, point, roi_size=100):
-        """간단하고 확실한 ROI 선택"""
+        """Simple and reliable ROI selection"""
         x, y = int(point[0]), int(point[1])
         
-        # 클릭 지점을 중심으로 정사각형 ROI
+        # Square ROI centered on click point
         half_size = roi_size // 2
         
-        # 경계 체크
+        # Boundary check
         x1 = max(0, x - half_size)
         y1 = max(0, y - half_size)
         x2 = min(frame.shape[1], x + half_size)
         y2 = min(frame.shape[0], y + half_size)
         
-        # 실제 크기 계산
+        # Calculate actual size
         actual_w = x2 - x1
         actual_h = y2 - y1
         
-        # 최소 크기 보장
+        # Ensure minimum size
         if actual_w < 60 or actual_h < 60:
             roi_size = 60
             half_size = roi_size // 2
@@ -74,20 +74,20 @@ class RobustPitchTracker:
         return (x1, y1, actual_w, actual_h)
     
     def init(self, frame, point):
-        """트래커 초기화"""
-        # 간단한 ROI 선택
+        """Initialize tracker"""
+        # Simple ROI selection
         self.bbox = self.simple_roi_selection(frame, point)
         x, y, w, h = self.bbox
         
-        # 템플릿 추출
+        # Extract template
         self.template = frame[y:y+h, x:x+w].copy()
         self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
         
-        # 중심점 설정
+        # Set center point
         self.center = [x + w//2, y + h//2]
         self.prev_center_y = self.center[1]
         
-        # 속도 초기화
+        # Initialize velocity
         self.velocity_x = 0
         self.velocity_y = 0
         self.failed_frames = 0
@@ -96,24 +96,24 @@ class RobustPitchTracker:
         return True
     
     def update(self, frame):
-        """트래커 업데이트 - 급격한 피치 다운 고려"""
+        """Update tracker - considering rapid pitch down"""
         if self.template is None or self.template_gray is None:
             return False, self.bbox
         
-        # 속도 기반 예측 위치
+        # Velocity-based predicted position
         predicted_x = self.center[0] + self.velocity_x
         predicted_y = self.center[1] + self.velocity_y
         
-        # 검색 영역 설정 - 매우 넓게
+        # Set search area - very wide
         template_w, template_h = self.template.shape[1], self.template.shape[0]
         search_w = int(template_w * self.search_scale)
         search_h = int(template_h * self.search_scale)
         
-        # 급격한 하향 움직임 고려하여 검색 영역을 아래쪽으로 확장
+        # Expand search area downward considering rapid downward movement
         search_x1 = max(0, int(predicted_x - search_w // 2))
-        search_y1 = max(0, int(predicted_y - search_h // 4))  # 위쪽은 1/4만
+        search_y1 = max(0, int(predicted_y - search_h // 4))  # Only 1/4 upward
         search_x2 = min(frame.shape[1], search_x1 + search_w)
-        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 1.5))  # 아래쪽은 1.5배
+        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 1.5))  # 1.5x downward
         
         search_region = frame[search_y1:search_y2, search_x1:search_x2]
         
@@ -121,18 +121,18 @@ class RobustPitchTracker:
             self.failed_frames += 1
             return self.failed_frames <= self.max_failed_frames, self.bbox
         
-        # 그레이스케일 변환
+        # Convert to grayscale
         search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
         
-        # 여러 스케일로 템플릿 매칭
+        # Template matching with multiple scales
         best_score = -1
         best_loc = None
         best_scale = 1.0
         
-        scales = [0.8, 0.9, 1.0, 1.1, 1.2]  # 더 넓은 스케일 범위
+        scales = [0.8, 0.9, 1.0, 1.1, 1.2]  # Wider scale range
         
         for scale in scales:
-            # 템플릿 리사이즈
+            # Resize template
             scaled_w = int(self.template_gray.shape[1] * scale)
             scaled_h = int(self.template_gray.shape[0] * scale)
             
@@ -141,7 +141,7 @@ class RobustPitchTracker:
                 
             scaled_template = cv2.resize(self.template_gray, (scaled_w, scaled_h))
             
-            # 템플릿 매칭
+            # Template matching
             result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
             
@@ -150,24 +150,24 @@ class RobustPitchTracker:
                 best_loc = max_loc
                 best_scale = scale
         
-        # 신뢰도 체크
+        # Confidence check
         if best_score < self.confidence_threshold:
             self.failed_frames += 1
             
-            # 속도 기반으로 위치 예측 (급격한 피치 다운 고려)
+            # Velocity-based position prediction (considering rapid pitch down)
             if self.failed_frames <= self.max_failed_frames:
-                # 피치 다운 가속도 적용
-                if self.velocity_y > 0:  # 아래쪽으로 움직이고 있다면
-                    self.velocity_y *= 1.2  # 가속
+                # Apply pitch down acceleration
+                if self.velocity_y > 0:  # If moving downward
+                    self.velocity_y *= 1.2  # Accelerate
                 
                 self.center[0] += self.velocity_x
                 self.center[1] += self.velocity_y
                 
-                # 경계 체크
+                # Boundary check
                 self.center[0] = max(template_w//2, min(self.center[0], frame.shape[1] - template_w//2))
                 self.center[1] = max(template_h//2, min(self.center[1], frame.shape[0] - template_h//2))
                 
-                # 바운딩 박스 업데이트
+                # Update bounding box
                 self.bbox = (
                     int(self.center[0] - template_w//2),
                     int(self.center[1] - template_h//2),
@@ -180,43 +180,43 @@ class RobustPitchTracker:
                 print(f"Tracking failed: confidence={best_score:.3f}")
                 return False, self.bbox
         
-        # 성공적인 매칭
+        # Successful matching
         self.failed_frames = 0
         
-        # 새로운 위치 계산
+        # Calculate new position
         template_w_scaled = int(self.template_gray.shape[1] * best_scale)
         template_h_scaled = int(self.template_gray.shape[0] * best_scale)
         
         new_center_x = search_x1 + best_loc[0] + template_w_scaled // 2
         new_center_y = search_y1 + best_loc[1] + template_h_scaled // 2
         
-        # 속도 계산
+        # Calculate velocity
         self.velocity_x = new_center_x - self.center[0]
         self.velocity_y = new_center_y - self.center[1]
         
-        # 피치 다운 감지
+        # Detect pitch down
         y_movement = new_center_y - self.prev_center_y
         if y_movement > self.pitch_down_threshold:
             print(f"Pitch down detected: {y_movement} pixels")
-            # 피치 다운 시 더 공격적으로 추적
+            # More aggressive tracking during pitch down
             self.confidence_threshold = 0.2
             self.search_scale = 4.0
         else:
-            # 정상 상태로 복귀
+            # Return to normal state
             self.confidence_threshold = 0.3
             self.search_scale = 3.0
         
         self.prev_center_y = new_center_y
         
-        # 중심점 업데이트
+        # Update center point
         self.center[0] = new_center_x
         self.center[1] = new_center_y
         
-        # 속도 감쇄
+        # Velocity decay
         self.velocity_x *= self.velocity_decay
         self.velocity_y *= self.velocity_decay
         
-        # 바운딩 박스 업데이트
+        # Update bounding box
         new_w = int(template_w_scaled)
         new_h = int(template_h_scaled)
         
@@ -227,7 +227,7 @@ class RobustPitchTracker:
             new_h
         )
         
-        # 템플릿 업데이트 (높은 신뢰도일 때만)
+        # Template update (only when high confidence)
         if best_score > 0.6:
             x, y, w, h = self.bbox
             if 0 <= x < frame.shape[1] - w and 0 <= y < frame.shape[0] - h:
@@ -595,19 +595,12 @@ def main():
                 disp_w = disp_x2 - disp_x
                 disp_h = disp_y2 - disp_y
                 
-                # 바운딩 박스
+                # Bounding box
                 cv2.rectangle(display_frame, (disp_x, disp_y), (disp_x + disp_w, disp_y + disp_h), (0, 255, 0), 2)
-                
-                # 속도 벡터 표시 (피치 다운 시각화)
-                if hasattr(tracker, 'velocity_x') and hasattr(tracker, 'velocity_y'):
-                    disp_center_x, disp_center_y = original_to_display_coord(int(center_x), int(center_y))
-                    end_x = int(disp_center_x + tracker.velocity_x * 5)
-                    end_y = int(disp_center_y + tracker.velocity_y * 5)
-                    cv2.arrowedLine(display_frame, (disp_center_x, disp_center_y), (end_x, end_y), (255, 0, 255), 2)
                 
                 send_data_to_serial(center_x, center_y, tracking)
             
-            # 상태 정보
+            # Status information
             status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
             cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if tracking else (0, 0, 255), 2)
             
@@ -615,10 +608,6 @@ def main():
             cv2.putText(display_frame, target_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if target_selected else (0, 0, 255), 2)
             
             cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # 피치 다운 상태 표시
-            if tracking and hasattr(tracker, 'velocity_y') and tracker.velocity_y > tracker.pitch_down_threshold:
-                cv2.putText(display_frame, "PITCH DOWN DETECTED", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
             buffer = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
             buffer.fill(0, display_frame.tobytes())
