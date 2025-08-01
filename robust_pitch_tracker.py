@@ -27,7 +27,7 @@ class RobustPitchTracker:
         self.center = None
         
         # Tracking parameters
-        self.search_scale = 3.0  # Expand search area to 3x template size
+        self.search_scale = 5.0  # Expand search area to 3x template size
         self.confidence_threshold = 0.3  # Low threshold setting
         self.template_update_rate = 0.05
         
@@ -504,7 +504,6 @@ def main():
             
             current_frame = original_frame.copy()
             
-            # 새 좌표 처리
             process_new_coordinate(original_frame)
             
             if not target_selected:
@@ -512,7 +511,6 @@ def main():
                 center_x = 0
                 center_y = 0
 
-            # 트래킹 업데이트
             if tracking and tracker is not None:
                 try:
                     success, new_bbox = tracker.update(original_frame)
@@ -586,7 +584,6 @@ def main():
                 
             display_to_original_coord = lambda dx, dy: local_display_to_original_coord(dx, dy)
             
-            # 트래킹 결과 표시
             if tracking and bbox is not None:
                 x, y, w, h = bbox
                 
