@@ -43,7 +43,7 @@ class RobustPitchTracker:
         
         # Pitch down detection
         self.prev_center_y = 0
-        self.pitch_down_threshold = 30  # Consider pitch down if moving 30+ pixels down per frame
+        self.pitch_down_threshold = 50  # Consider pitch down if moving 50+ pixels down per frame
         
     def simple_roi_selection(self, frame, point, roi_size=100):
         """Simple and reliable ROI selection"""
@@ -113,7 +113,7 @@ class RobustPitchTracker:
         search_x1 = max(0, int(predicted_x - search_w // 2))
         search_y1 = max(0, int(predicted_y - search_h // 4))  # Only 1/4 upward
         search_x2 = min(frame.shape[1], search_x1 + search_w)
-        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 2.0))  # 2x downward
+        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 1.5))  # 1.5x downward
         
         search_region = frame[search_y1:search_y2, search_x1:search_x2]
         
@@ -158,7 +158,7 @@ class RobustPitchTracker:
             if self.failed_frames <= self.max_failed_frames:
                 # Apply pitch down acceleration
                 if self.velocity_y > 0:  # If moving downward
-                    self.velocity_y *= 1.5  # Accelerate more aggressively
+                    self.velocity_y *= 1.2  # Accelerate
                 
                 self.center[0] += self.velocity_x
                 self.center[1] += self.velocity_y
@@ -199,14 +199,12 @@ class RobustPitchTracker:
         if y_movement > self.pitch_down_threshold:
             print(f"Pitch down detected: {y_movement} pixels")
             # More aggressive tracking during pitch down
-            self.confidence_threshold = 0.1
+            self.confidence_threshold = 0.2
             self.search_scale = 4.0
-            self.velocity_decay = 0.9  # Reduce decay to maintain momentum
         else:
             # Return to normal state
-            self.confidence_threshold = 0.2
-            self.search_scale = 8
-            self.velocity_decay = 0.8  # Restore normal decay
+            self.confidence_threshold = 0.3
+            self.search_scale = 3.0
         
         self.prev_center_y = new_center_y
         
