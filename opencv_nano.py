@@ -7,24 +7,7 @@ import time
 import serial
 import gi
 import os
-import math
-
-# NCNN Python bindings - try different import methods
-try:
-    import ncnn
-    print("Using ncnn module")
-except ImportError:
-    try:
-        from ncnn import ncnn
-        print("Using ncnn.ncnn module")
-    except ImportError:
-        print("Please install ncnn-python:")
-        print("  pip install ncnn")
-        print("  or")
-        print("  pip install ncnn-vulkan")
-        print("  or for ARM platforms:")
-        print("  pip install ncnn-arm")
-        exit(1)
+import ncnn
 
 # Set GStreamer plugin path
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
@@ -33,6 +16,207 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
 Gst.init(None)
+
+# NCNN Tracker Class
+class NCNNTracker:
+    def __init__(self, backbone_param, backbone_bin, head_param, head_bin, use_gpu=False):
+        """
+        NCNN 기반 NanoTrack 트래커 초기화
+        backbone_param: backbone .param 파일 경로
+        backbone_bin: backbone .bin 파일 경로
+        head_param: head .param 파일 경로
+        head_bin: head .bin 파일 경로
+        use_gpu: GPU 사용 여부
+        """
+        # Backbone 네트워크 (특징 추출)
+        self.backbone = ncnn.Net()
+        self.backbone.opt.use_vulkan_compute = use_gpu
+        self.backbone.opt.num_threads = 4
+        self.backbone.load_param(backbone_param)
+        self.backbone.load_model(backbone_bin)
+        
+        # Head 네트워크 (분류 및 회귀)
+        self.head = ncnn.Net()
+        self.head.opt.use_vulkan_compute = use_gpu
+        self.head.opt.num_threads = 4
+        self.head.load_param(head_param)
+        self.head.load_model(head_bin)
+        
+        self.template_feature = None
+        self.search_size = 255
+        self.template_size = 127
+        self.stride = 16  # NanoTrack default stride
+        self.initialized = False
+        self.window = None
+        
+    def init(self, frame, bbox):
+        """
+        트래커 초기화
+        frame: 첫 프레임
+        bbox: (x, y, w, h) 형태의 바운딩 박스
+        """
+        x, y, w, h = bbox
+        cx = x + w / 2
+        cy = y + h / 2
+        
+        # Template 추출
+        context_amount = 0.5
+        wc_z = w + context_amount * (w + h)
+        hc_z = h + context_amount * (w + h)
+        s_z = np.sqrt(wc_z * hc_z)
+        scale_z = self.template_size / s_z
+        
+        template = self._crop_and_resize(frame, cx, cy, self.template_size, s_z)
+        
+        # Template feature 추출 (backbone 사용)
+        template_blob = self._preprocess(template)
+        ex = self.backbone.create_extractor()
+        ex.input("input", template_blob)
+        _, self.template_feature = ex.extract("output")  # backbone output
+        
+        # 윈도우 생성 (코사인 윈도우)
+        self.window = self._create_window()
+        
+        self.target_pos = np.array([cx, cy])
+        self.target_size = np.array([w, h])
+        self.s_z = s_z
+        self.initialized = True
+        
+        return True
+    
+    def update(self, frame):
+        """
+        트래킹 업데이트
+        frame: 현재 프레임
+        return: (success, bbox)
+        """
+        if not self.initialized:
+            return False, None
+        
+        # Search region 크기 계산
+        context_amount = 0.5
+        wc_x = self.target_size[0] + context_amount * sum(self.target_size)
+        hc_x = self.target_size[1] + context_amount * sum(self.target_size)
+        s_x = np.sqrt(wc_x * hc_x)
+        scale_x = self.search_size / s_x
+        
+        # Search region 추출
+        search = self._crop_and_resize(frame, self.target_pos[0], self.target_pos[1],
+                                      self.search_size, s_x)
+        
+        # Search feature 추출 (backbone 사용)
+        search_blob = self._preprocess(search)
+        ex_backbone = self.backbone.create_extractor()
+        ex_backbone.input("input", search_blob)
+        _, search_feature = ex_backbone.extract("output")
+        
+        # Head 네트워크로 예측
+        ex_head = self.head.create_extractor()
+        ex_head.input("template", self.template_feature)
+        ex_head.input("search", search_feature)
+        
+        # Classification과 regression 결과 추출
+        _, cls_score = ex_head.extract("cls")
+        _, bbox_pred = ex_head.extract("reg")
+        
+        # Score map 처리
+        score_map = cls_score.reshape(17, 17)  # NanoTrack은 17x17 출력
+        
+        # 윈도우 적용
+        if self.window is not None:
+            score_map = score_map * self.window
+        
+        # 최대 점수 위치 찾기
+        best_idx = np.argmax(score_map)
+        y_idx = best_idx // 17
+        x_idx = best_idx % 17
+        
+        # 바운딩 박스 예측값 추출
+        bbox_delta = bbox_pred.reshape(4, 17, 17)[:, y_idx, x_idx]
+        
+        # 위치 업데이트
+        disp = (np.array([x_idx, y_idx]) - 8) * self.stride / scale_x
+        self.target_pos += disp
+        
+        # 크기 업데이트
+        lr = 0.4  # learning rate
+        self.target_size = self.target_size * (1 - lr) + \
+                          self.target_size * np.exp(bbox_delta[2:]) * lr
+        
+        # 바운딩 박스 생성
+        x = self.target_pos[0] - self.target_size[0] / 2
+        y = self.target_pos[1] - self.target_size[1] / 2
+        
+        # 이미지 경계 체크
+        h, w = frame.shape[:2]
+        x = max(0, min(x, w - self.target_size[0]))
+        y = max(0, min(y, h - self.target_size[1]))
+        
+        bbox = (int(x), int(y), int(self.target_size[0]), int(self.target_size[1]))
+        
+        return True, bbox
+    
+    def _create_window(self):
+        """
+        코사인 윈도우 생성
+        """
+        hanning = np.hanning(17)
+        window = np.outer(hanning, hanning)
+        return window
+    
+    def _crop_and_resize(self, img, cx, cy, size, s):
+        """
+        이미지에서 특정 영역을 크롭하고 리사이즈
+        """
+        im_h, im_w = img.shape[:2]
+        
+        # 패딩 계산
+        context_xmin = int(cx - s / 2)
+        context_xmax = int(cx + s / 2)
+        context_ymin = int(cy - s / 2)
+        context_ymax = int(cy + s / 2)
+        
+        left_pad = max(0, -context_xmin)
+        top_pad = max(0, -context_ymin)
+        right_pad = max(0, context_xmax - im_w)
+        bottom_pad = max(0, context_ymax - im_h)
+        
+        context_xmin += left_pad
+        context_xmax += left_pad
+        context_ymin += top_pad
+        context_ymax += top_pad
+        
+        # 패딩 적용
+        if any([left_pad, top_pad, right_pad, bottom_pad]):
+            img = cv2.copyMakeBorder(img, top_pad, bottom_pad, left_pad, right_pad,
+                                    cv2.BORDER_CONSTANT, value=(114, 114, 114))  # NanoTrack uses gray padding
+        
+        # 크롭 및 리사이즈
+        patch = img[context_ymin:context_ymax, context_xmin:context_xmax]
+        patch = cv2.resize(patch, (size, size))
+        
+        return patch
+    
+    def _preprocess(self, img):
+        """
+        이미지 전처리 (NanoTrack 스타일)
+        """
+        # BGR to RGB
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Normalize (ImageNet 표준)
+        img = img.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        img = (img - mean) / std
+        
+        # HWC to CHW
+        img = np.transpose(img, (2, 0, 1))
+        
+        # Create ncnn mat
+        mat = ncnn.Mat(img.shape[2], img.shape[1], img.shape[0], img.data)
+        
+        return mat
 
 # Global variables
 current_frame = None
@@ -47,344 +231,6 @@ serial_port = None
 zoom_level = 1.0
 zoom_command = None
 zoom_center = None
-
-class NanoTrack:
-    def __init__(self, model_path="models", use_gpu=False):
-        self.cfg = {
-            'context_amount': 0.5,
-            'exemplar_size': 127,
-            'instance_size': 255,
-            'score_size': 16,
-            'total_stride': 16,
-            'window_influence': 0.21,
-            'penalty_k': 0.04,
-            'lr': 0.33
-        }
-        
-        try:
-            # Load models with basic settings
-            self.net_backbone = ncnn.Net()
-            
-            # Set only the commonly available options
-            self.net_backbone.opt.num_threads = 1  # Set threads before loading param
-            
-            # Try to enable GPU if available and requested
-            if use_gpu:
-                try:
-                    if hasattr(self.net_backbone.opt, 'use_vulkan_compute'):
-                        self.net_backbone.opt.use_vulkan_compute = True
-                        print("Using GPU acceleration (Vulkan)")
-                except:
-                    print("GPU acceleration not available")
-            
-            self.net_backbone.load_param(f"{model_path}/nanotrack_backbone_sim.param")
-            self.net_backbone.load_model(f"{model_path}/nanotrack_backbone_sim.bin")
-            
-            self.net_head = ncnn.Net()
-            self.net_head.opt.num_threads = 1  # Set threads before loading param
-            
-            if use_gpu:
-                try:
-                    if hasattr(self.net_head.opt, 'use_vulkan_compute'):
-                        self.net_head.opt.use_vulkan_compute = True
-                except:
-                    pass
-                
-            self.net_head.load_param(f"{model_path}/nanotrack_head_sim.param")
-            self.net_head.load_model(f"{model_path}/nanotrack_head_sim.bin")
-            
-        except Exception as e:
-            print(f"Failed to load NanoTrack models: {e}")
-            raise
-        
-        self.state = {}
-        self.window = None
-        self.grid_to_search_x = None
-        self.grid_to_search_y = None
-        self.zf = None
-        
-        self._create_window()
-        self._create_grids()
-    
-    def _create_window(self):
-        """Create Hanning window for penalty"""
-        score_size = self.cfg['score_size']
-        hanning = np.hanning(score_size)
-        self.window = np.outer(hanning, hanning).flatten()
-    
-    def _create_grids(self):
-        """Create search grid coordinates"""
-        sz = self.cfg['score_size']
-        self.grid_to_search_x = np.zeros((sz, sz))
-        self.grid_to_search_y = np.zeros((sz, sz))
-        
-        for i in range(sz):
-            for j in range(sz):
-                self.grid_to_search_x[i, j] = j * self.cfg['total_stride']
-                self.grid_to_search_y[i, j] = i * self.cfg['total_stride']
-        
-        self.grid_to_search_x = self.grid_to_search_x.flatten()
-        self.grid_to_search_y = self.grid_to_search_y.flatten()
-    
-    def _get_subwindow_tracking(self, im, pos, model_sz, original_sz, channel_ave):
-        """Get subwindow for tracking"""
-        c = (original_sz + 1) / 2
-        context_xmin = int(np.round(pos[0] - c))
-        context_xmax = context_xmin + original_sz - 1
-        context_ymin = int(np.round(pos[1] - c))
-        context_ymax = context_ymin + original_sz - 1
-        
-        left_pad = max(0, -context_xmin)
-        top_pad = max(0, -context_ymin)
-        right_pad = max(0, context_xmax - im.shape[1] + 1)
-        bottom_pad = max(0, context_ymax - im.shape[0] + 1)
-        
-        context_xmin += left_pad
-        context_xmax += left_pad
-        context_ymin += top_pad
-        context_ymax += top_pad
-        
-        if any([top_pad, left_pad, right_pad, bottom_pad]):
-            te_im = cv2.copyMakeBorder(im, top_pad, bottom_pad, left_pad, right_pad,
-                                       cv2.BORDER_CONSTANT, value=channel_ave)
-            im_path_original = te_im[context_ymin:context_ymax + 1, 
-                                    context_xmin:context_xmax + 1]
-        else:
-            im_path_original = im[context_ymin:context_ymax + 1,
-                                 context_xmin:context_xmax + 1]
-        
-        im_path = cv2.resize(im_path_original, (model_sz, model_sz))
-        return im_path
-    
-    def init(self, img, bbox):
-        """Initialize tracker with first frame and bounding box"""
-        target_pos = np.array([bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2])
-        target_sz = np.array([bbox[2], bbox[3]])
-        
-        wc_z = target_sz[0] + self.cfg['context_amount'] * sum(target_sz)
-        hc_z = target_sz[1] + self.cfg['context_amount'] * sum(target_sz)
-        s_z = round(np.sqrt(wc_z * hc_z))
-        
-        avg_chans = np.mean(img, axis=(0, 1))
-        z_crop = self._get_subwindow_tracking(img, target_pos, 
-                                              self.cfg['exemplar_size'],
-                                              int(s_z), avg_chans)
-        
-        # Convert to NCNN format and extract features
-        # Ensure z_crop is contiguous and uint8
-        z_crop = np.ascontiguousarray(z_crop, dtype=np.uint8)
-        
-        # Create NCNN Mat - API may vary by version
-        try:
-            # Try newer API
-            ncnn_img = ncnn.Mat.from_pixels(z_crop, ncnn.Mat.PixelType.PIXEL_BGR2RGB, 
-                                            z_crop.shape[1], z_crop.shape[0])
-        except:
-            try:
-                # Try without PixelType enum
-                ncnn_img = ncnn.Mat.from_pixels(z_crop, ncnn.Mat.PIXEL_BGR2RGB, 
-                                                z_crop.shape[1], z_crop.shape[0])
-            except:
-                try:
-                    # Try alternative API
-                    ncnn_img = ncnn.Mat(z_crop.shape[1], z_crop.shape[0], z_crop.shape[2])
-                    ncnn_img.from_pixels(z_crop, ncnn.Mat.PIXEL_BGR2RGB)
-                except:
-                    # Fallback to basic Mat creation
-                    ncnn_img = ncnn.Mat(z_crop)
-        
-        ex_backbone = self.net_backbone.create_extractor()
-        
-        ex_backbone.input("input", ncnn_img)
-        
-        # Extract features - API may return different formats
-        result = ex_backbone.extract("output")
-        if isinstance(result, tuple):
-            _, self.zf = result
-        else:
-            self.zf = result
-        
-        self.state = {
-            'channel_ave': avg_chans,
-            'im_h': img.shape[0],
-            'im_w': img.shape[1],
-            'target_pos': target_pos,
-            'target_sz': target_sz
-        }
-    
-    def _sigmoid(self, x):
-        """Fast sigmoid function"""
-        return 1.0 / (1.0 + np.exp(-x))
-    
-    def _sz_wh_fun(self, wh):
-        """Size function"""
-        pad = sum(wh) * 0.5
-        sz2 = (wh[0] + pad) * (wh[1] + pad)
-        return np.sqrt(sz2)
-    
-    def _update(self, x_crops, target_pos, target_sz, scale_z):
-        """Update tracker with new frame"""
-        # Extract features from search region
-        # Ensure x_crops is contiguous and uint8
-        x_crops = np.ascontiguousarray(x_crops, dtype=np.uint8)
-        
-        # Create NCNN Mat - API may vary by version
-        try:
-            # Try newer API
-            ncnn_img = ncnn.Mat.from_pixels(x_crops, ncnn.Mat.PixelType.PIXEL_BGR2RGB,
-                                            x_crops.shape[1], x_crops.shape[0])
-        except:
-            try:
-                # Try without PixelType enum
-                ncnn_img = ncnn.Mat.from_pixels(x_crops, ncnn.Mat.PIXEL_BGR2RGB,
-                                                x_crops.shape[1], x_crops.shape[0])
-            except:
-                try:
-                    # Try alternative API
-                    ncnn_img = ncnn.Mat(x_crops.shape[1], x_crops.shape[0], x_crops.shape[2])
-                    ncnn_img.from_pixels(x_crops, ncnn.Mat.PIXEL_BGR2RGB)
-                except:
-                    # Fallback to basic Mat creation
-                    ncnn_img = ncnn.Mat(x_crops)
-        
-        ex_backbone = self.net_backbone.create_extractor()
-        
-        ex_backbone.input("input", ncnn_img)
-        
-        # Extract features - API may return different formats
-        result = ex_backbone.extract("output")
-        if isinstance(result, tuple):
-            _, xf = result
-        else:
-            xf = result
-        
-        # Head network
-        ex_head = self.net_head.create_extractor()
-        
-        ex_head.input("input1", self.zf)
-        ex_head.input("input2", xf)
-        
-        # Extract classification and bbox prediction
-        cls_result = ex_head.extract("output1")
-        if isinstance(cls_result, tuple):
-            _, cls_score = cls_result
-        else:
-            cls_score = cls_result
-            
-        bbox_result = ex_head.extract("output2")
-        if isinstance(bbox_result, tuple):
-            _, bbox_pred = bbox_result
-        else:
-            bbox_pred = bbox_result
-        
-        # Convert to numpy arrays
-        cls_score_np = np.array(cls_score).reshape(self.cfg['score_size'], 
-                                                   self.cfg['score_size'], 2)
-        cls_score_sigmoid = self._sigmoid(cls_score_np[:, :, 1].flatten())
-        
-        bbox_pred_np = np.array(bbox_pred).reshape(self.cfg['score_size'],
-                                                   self.cfg['score_size'], 4)
-        
-        # Calculate predicted bbox
-        rows, cols = self.cfg['score_size'], self.cfg['score_size']
-        pred_x1 = self.grid_to_search_x - bbox_pred_np[:, :, 0].flatten()
-        pred_y1 = self.grid_to_search_y - bbox_pred_np[:, :, 1].flatten()
-        pred_x2 = self.grid_to_search_x + bbox_pred_np[:, :, 2].flatten()
-        pred_y2 = self.grid_to_search_y + bbox_pred_np[:, :, 3].flatten()
-        
-        # Size penalty
-        w = pred_x2 - pred_x1
-        h = pred_y2 - pred_y1
-        
-        sz_wh = self._sz_wh_fun(target_sz)
-        s_c = np.maximum(w + h, 1e-6)
-        r_c = np.maximum(w / np.maximum(h, 1e-6), 1e-6)
-        
-        penalty = np.exp(-(s_c * r_c - 1) * self.cfg['penalty_k'])
-        
-        # Window penalty
-        pscore = penalty * cls_score_sigmoid * (1 - self.cfg['window_influence']) + \
-                self.window * self.cfg['window_influence']
-        
-        # Get max score position
-        max_idx = np.argmax(pscore)
-        r_max = max_idx // cols
-        c_max = max_idx % cols
-        
-        # Get real size
-        pred_x1_real = pred_x1[max_idx]
-        pred_y1_real = pred_y1[max_idx]
-        pred_x2_real = pred_x2[max_idx]
-        pred_y2_real = pred_y2[max_idx]
-        
-        pred_xs = (pred_x1_real + pred_x2_real) / 2
-        pred_ys = (pred_y1_real + pred_y2_real) / 2
-        pred_w = pred_x2_real - pred_x1_real
-        pred_h = pred_y2_real - pred_y1_real
-        
-        diff_xs = pred_xs - self.cfg['instance_size'] / 2
-        diff_ys = pred_ys - self.cfg['instance_size'] / 2
-        
-        diff_xs /= scale_z
-        diff_ys /= scale_z
-        pred_w /= scale_z
-        pred_h /= scale_z
-        
-        target_sz = target_sz / scale_z
-        
-        # Learning rate
-        lr = penalty[max_idx] * cls_score_sigmoid[max_idx] * self.cfg['lr']
-        
-        # Update position and size
-        res_x = target_pos[0] + diff_xs
-        res_y = target_pos[1] + diff_ys
-        res_w = pred_w * lr + (1 - lr) * target_sz[0]
-        res_h = pred_h * lr + (1 - lr) * target_sz[1]
-        
-        target_pos[0] = res_x
-        target_pos[1] = res_y
-        target_sz[0] = target_sz[0] * (1 - lr) + lr * res_w
-        target_sz[1] = target_sz[1] * (1 - lr) + lr * res_h
-        
-        return target_pos, target_sz, cls_score_sigmoid[max_idx]
-    
-    def track(self, img):
-        """Track object in new frame"""
-        target_pos = self.state['target_pos'].copy()
-        target_sz = self.state['target_sz'].copy()
-        
-        hc_z = target_sz[1] + self.cfg['context_amount'] * sum(target_sz)
-        wc_z = target_sz[0] + self.cfg['context_amount'] * sum(target_sz)
-        s_z = np.sqrt(wc_z * hc_z)
-        scale_z = self.cfg['exemplar_size'] / s_z
-        
-        d_search = (self.cfg['instance_size'] - self.cfg['exemplar_size']) / 2
-        pad = d_search / scale_z
-        s_x = s_z + 2 * pad
-        
-        x_crop = self._get_subwindow_tracking(img, target_pos,
-                                              self.cfg['instance_size'],
-                                              int(s_x), self.state['channel_ave'])
-        
-        # Update
-        target_sz = target_sz * scale_z
-        target_pos, target_sz, score = self._update(x_crop, target_pos, target_sz, scale_z)
-        
-        # Clip to image boundaries
-        target_pos[0] = np.clip(target_pos[0], 0, self.state['im_w'])
-        target_pos[1] = np.clip(target_pos[1], 0, self.state['im_h'])
-        target_sz[0] = np.clip(target_sz[0], 10, self.state['im_w'])
-        target_sz[1] = np.clip(target_sz[1], 10, self.state['im_h'])
-        
-        self.state['target_pos'] = target_pos
-        self.state['target_sz'] = target_sz
-        
-        # Convert to bbox format (x, y, w, h)
-        bbox = [target_pos[0] - target_sz[0]/2, 
-                target_pos[1] - target_sz[1]/2,
-                target_sz[0], target_sz[1]]
-        
-        return True, bbox, score
 
 def camera_init(capture, resolution_index=0):
     if capture.isOpened():
@@ -408,6 +254,11 @@ def camera_init(capture, resolution_index=0):
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
     capture.set(cv2.CAP_PROP_FPS, 25)
+
+    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
+    width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    fps = capture.get(cv2.CAP_PROP_FPS)
 
     return True
 
@@ -537,34 +388,45 @@ def process_new_coordinate(frame):
         current_frame = frame.copy()
         
         if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-            roi_size = int(500 / zoom_level)
+            roi_size = int(100 / zoom_level)
             left = max(0, x - roi_size // 2)
             top = max(0, y - roi_size // 2)
             right = min(frame.shape[1], x + roi_size // 2)
             bottom = min(frame.shape[0], y + roi_size // 2)
             roi = (left, top, right - left, bottom - top)
             
-            # Initialize NanoTrack instead of KCF
-            tracker = NanoTrack(model_path="models", use_gpu=False)  # Set use_gpu=True for GPU acceleration
-            tracker.init(frame, roi)
-            tracking = True
-            
-            # Still use Kalman filter for prediction
-            kalman = cv2.KalmanFilter(4, 2)
-            kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
-            kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
-            kalman.processNoiseCov = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32) * 0.03
-            kalman.measurementNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * 0.1
+            # NCNN 트래커 초기화
+            success = tracker.init(frame, roi)
+            if success:
+                tracking = True
+                
+                # Kalman filter 초기화
+                kalman = cv2.KalmanFilter(4, 2)
+                kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+                kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
+                kalman.processNoiseCov = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32) * 0.03
+                kalman.measurementNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * 0.1
 
-            center_x = left + (right - left) / 2
-            center_y = top + (bottom - top) / 2
-            kalman.statePre = np.array([[center_x], [center_y], [0], [0]], np.float32)
-            kalman.statePost = np.array([[center_x], [center_y], [0], [0]], np.float32)
+                center_x = left + (right - left) / 2
+                center_y = top + (bottom - top) / 2
+                kalman.statePre = np.array([[center_x], [center_y], [0], [0]], np.float32)
+                kalman.statePost = np.array([[center_x], [center_y], [0], [0]], np.float32)
         else:
             pass
 
 def main():
     global current_frame, tracker, tracking, roi, target_selected, kalman, serial_port, zoom_level, zoom_command, zoom_center
+    
+    # NCNN NanoTrack 트래커 초기화
+    # models 폴더에 있는 NanoTrack 모델 파일 사용
+    MODEL_PATH = "./models"  # models 폴더 경로
+    tracker = NCNNTracker(
+        backbone_param=f"{MODEL_PATH}/nanotrack_backbone_sim.param",
+        backbone_bin=f"{MODEL_PATH}/nanotrack_backbone_sim.bin",
+        head_param=f"{MODEL_PATH}/nanotrack_head_sim.param",
+        head_bin=f"{MODEL_PATH}/nanotrack_head_sim.bin",
+        use_gpu=True  # Jetson의 GPU 사용
+    )
     
     serial_port = setup_serial()
     
@@ -653,10 +515,10 @@ def main():
                 prediction = kalman.predict()
                 pred_x, pred_y = int(prediction[0]), int(prediction[1])
 
-                # Use NanoTrack for tracking
-                success, bbox, score = tracker.track(original_frame)
-                if success and score > 0.5:  # Add confidence threshold
-                    x, y, w, h = [int(v) for v in bbox]
+                # NCNN 트래커 업데이트
+                success, bbox = tracker.update(original_frame)
+                if success:
+                    x, y, w, h = bbox
                     roi = (x, y, w, h)
                     center_x = x + w / 2
                     center_y = y + h / 2
@@ -664,7 +526,7 @@ def main():
                     kalman.correct(measurement)
                 else:
                     center_x, center_y = pred_x, pred_y
-                    tracking = False  # Lost tracking
+                    tracking = False  # 트래킹 실패 시 중지
             
             display_frame = original_frame.copy()
             
@@ -748,11 +610,12 @@ def main():
             target_status = "Target Selected" if target_selected else "No Target"
             cv2.putText(display_frame, target_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if target_selected else (0, 0, 255), 2)
             cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(display_frame, "NCNN Tracker", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
             if zoom_applied and tracking:
                 disp_x, disp_y = original_to_display_coord(int(center_x), int(center_y))
                 debug_info = f"Orig: ({int(center_x)}, {int(center_y)}) -> Disp: ({disp_x}, {disp_y})"
-                cv2.putText(display_frame, debug_info, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(display_frame, debug_info, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
             buffer = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
             buffer.fill(0, display_frame.tobytes())
@@ -770,7 +633,7 @@ def main():
         pass
     
     except Exception as e:
-        print(f"Error: {e}")
+        pass
     
     finally:
         if serial_port and serial_port.is_open:
