@@ -308,10 +308,10 @@ def process_new_coordinate(frame):
             # tracker = cv2.TrackerKCF_create()
 
             tracker = NanoTracker(
-                "./models/nanotrack_backbone_sim.param",
-                "./models/nanotrack_backbone_sim.bin",
-                "./models/nanotrack_head_sim.param",
-                "./models/nanotrack_head_sim.bin"
+                "/models/nanotrack_backbone_sim.param",
+                "/models/nanotrack_backbone_sim.bin",
+                "/models/nanotrack_head_sim.param",
+                "/models/nanotrack_head_sim.bin"
             )
 
             tracker.init(frame, roi)
