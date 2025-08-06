@@ -69,16 +69,24 @@ class NanoTracker:
         """KCF와 동일한 인터페이스"""
         x, y, w, h = roi
         
+        # BGR to RGB 변환 추가
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
         # 템플릿 추출 (127x127)
-        template = self._crop_and_resize(frame, x, y, w, h, 127)
+        template = self._crop_and_resize(frame_rgb, x, y, w, h, 127)
         
         # Backbone으로 특징 추출
         ex = self.backbone.create_extractor()
-        mat_in = ncnn.Mat.from_pixels(template, ncnn.Mat.RGB, 127, 127)
-        ex.input("data", mat_in)
-        _, self.template_feat = ex.extract("output")
         
-        # 윈도우 생성 (코사인 윈도우)
+        # 정규화 추가 (0-255 -> 0-1)
+        template_norm = template.astype(np.float32) / 255.0
+        mat_in = ncnn.Mat.from_pixels(template_norm, ncnn.Mat.PixelType.RGB, 127, 127)
+        
+        # 실제 레이어 이름 사용 (param 파일 확인 필요)
+        ex.input("input", mat_in)  # "data" 대신 "input" 시도
+        _, self.template_feat = ex.extract("output")  # 또는 "fc" 등
+        
+        # 윈도우 생성
         self.window = self._create_window(255)
         self.center = [x + w/2, y + h/2]
         self.size = [w, h]
