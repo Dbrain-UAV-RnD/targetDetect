@@ -43,12 +43,14 @@ class NanoTrack:
         
         self.net_backbone = ncnn.Net()
         self.net_backbone.opt.num_threads = 1
+        self.net_backbone.opt.use_local_pool_allocator = True
         self.net_backbone.opt.use_vulkan_compute = False
         self.net_backbone.load_param(backbone_param_path)
         self.net_backbone.load_model(backbone_bin_path)
         
         self.net_head = ncnn.Net()
         self.net_head.opt.num_threads = 1
+        self.net_head.opt.use_local_pool_allocator = True
         self.net_head.opt.use_vulkan_compute = False
         self.net_head.load_param(head_param_path)
         self.net_head.load_model(head_bin_path)
@@ -119,13 +121,6 @@ class NanoTrack:
         
         actual_w = x2 - x1
         actual_h = y2 - y1
-        
-        if actual_w < 60 or actual_h < 60:
-            roi_size = 60
-            half_size = roi_size // 2
-            x1 = max(0, min(x - half_size, frame.shape[1] - roi_size))
-            y1 = max(0, min(y - half_size, frame.shape[0] - roi_size))
-            actual_w = actual_h = roi_size
         
         print(f"ROI selected: ({x1}, {y1}, {actual_w}, {actual_h}) at click point ({x}, {y})")
         return (x1, y1, actual_w, actual_h)
@@ -262,6 +257,187 @@ class NanoTrack:
             int(self.target_sz[0]),
             int(self.target_sz[1])
         )
+        
+        return True, self.bbox
+
+
+class RobustPitchTracker:
+    
+    def __init__(self):
+        self.template = None
+        self.template_gray = None
+        self.bbox = None
+        self.center = None
+        
+        self.search_scale = 3.0
+        self.confidence_threshold = 0.2
+        self.template_update_rate = 0.05
+        
+        self.max_movement_ratio = 0.5
+        self.velocity_x = 0
+        self.velocity_y = 0
+        self.velocity_decay = 0.8
+        
+        self.failed_frames = 0
+        self.max_failed_frames = 10
+        
+        self.prev_center_y = 0
+        self.pitch_down_threshold = 50
+        
+    def simple_roi_selection(self, frame, point, roi_size=100):
+        x, y = int(point[0]), int(point[1])
+        
+        half_size = roi_size // 2
+        
+        x1 = max(0, x - half_size)
+        y1 = max(0, y - half_size)
+        x2 = min(frame.shape[1], x + half_size)
+        y2 = min(frame.shape[0], y + half_size)
+        
+        actual_w = x2 - x1
+        actual_h = y2 - y1
+        
+        print(f"ROI selected: ({x1}, {y1}, {actual_w}, {actual_h}) at click point ({x}, {y})")
+        return (x1, y1, actual_w, actual_h)
+    
+    def init(self, frame, point):
+        self.bbox = self.simple_roi_selection(frame, point)
+        x, y, w, h = self.bbox
+        
+        self.template = frame[y:y+h, x:x+w].copy()
+        self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
+        
+        self.center = [x + w//2, y + h//2]
+        self.prev_center_y = self.center[1]
+        
+        self.velocity_x = 0
+        self.velocity_y = 0
+        self.failed_frames = 0
+        
+        print(f"Tracker initialized at {self.center} with bbox {self.bbox}")
+        return True
+    
+    def update(self, frame):
+        if self.template is None or self.template_gray is None:
+            return False, self.bbox
+        
+        predicted_x = self.center[0] + self.velocity_x
+        predicted_y = self.center[1] + self.velocity_y
+        
+        template_w, template_h = self.template.shape[1], self.template.shape[0]
+        search_w = int(template_w * self.search_scale)
+        search_h = int(template_h * self.search_scale)
+        
+        search_x1 = max(0, int(predicted_x - search_w // 2))
+        search_y1 = max(0, int(predicted_y - search_h // 4))
+        search_x2 = min(frame.shape[1], search_x1 + search_w)
+        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 1.5))
+        
+        search_region = frame[search_y1:search_y2, search_x1:search_x2]
+        
+        if search_region.size == 0:
+            self.failed_frames += 1
+            return self.failed_frames <= self.max_failed_frames, self.bbox
+        
+        search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
+        
+        best_score = -1
+        best_loc = None
+        best_scale = 1.0
+        
+        scales = [0.8, 0.9, 1.0, 1.1, 1.2]
+        
+        for scale in scales:
+            scaled_w = int(self.template_gray.shape[1] * scale)
+            scaled_h = int(self.template_gray.shape[0] * scale)
+            
+            if scaled_w > search_gray.shape[1] or scaled_h > search_gray.shape[0]:
+                continue
+                
+            scaled_template = cv2.resize(self.template_gray, (scaled_w, scaled_h))
+            
+            result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            
+            if max_val > best_score:
+                best_score = max_val
+                best_loc = max_loc
+                best_scale = scale
+        
+        if best_score < self.confidence_threshold:
+            self.failed_frames += 1
+            
+            if self.failed_frames <= self.max_failed_frames:
+                if self.velocity_y > 0:
+                    self.velocity_y *= 1.2
+                
+                self.center[0] += self.velocity_x
+                self.center[1] += self.velocity_y
+                
+                self.center[0] = max(template_w//2, min(self.center[0], frame.shape[1] - template_w//2))
+                self.center[1] = max(template_h//2, min(self.center[1], frame.shape[0] - template_h//2))
+                
+                self.bbox = (
+                    int(self.center[0] - template_w//2),
+                    int(self.center[1] - template_h//2),
+                    template_w,
+                    template_h
+                )
+                
+                return True, self.bbox
+            else:
+                print(f"Tracking failed: confidence={best_score:.3f}")
+                return False, self.bbox
+        
+        self.failed_frames = 0
+        
+        template_w_scaled = int(self.template_gray.shape[1] * best_scale)
+        template_h_scaled = int(self.template_gray.shape[0] * best_scale)
+        
+        new_center_x = search_x1 + best_loc[0] + template_w_scaled // 2
+        new_center_y = search_y1 + best_loc[1] + template_h_scaled // 2
+        
+        self.velocity_x = new_center_x - self.center[0]
+        self.velocity_y = new_center_y - self.center[1]
+        
+        y_movement = new_center_y - self.prev_center_y
+        if y_movement > self.pitch_down_threshold:
+            print(f"Pitch down detected: {y_movement} pixels")
+            self.confidence_threshold = 0.2
+            self.search_scale = 4.0
+        else:
+            self.confidence_threshold = 0.3
+            self.search_scale = 3.0
+        
+        self.prev_center_y = new_center_y
+        
+        self.center[0] = new_center_x
+        self.center[1] = new_center_y
+        
+        self.velocity_x *= self.velocity_decay
+        self.velocity_y *= self.velocity_decay
+        
+        new_w = int(template_w_scaled)
+        new_h = int(template_h_scaled)
+        
+        self.bbox = (
+            int(self.center[0] - new_w//2),
+            int(self.center[1] - new_h//2),
+            new_w,
+            new_h
+        )
+        
+        if best_score > 0.6:
+            x, y, w, h = self.bbox
+            if 0 <= x < frame.shape[1] - w and 0 <= y < frame.shape[0] - h:
+                new_template = frame[y:y+h, x:x+w]
+                if new_template.size > 0:
+                    self.template = cv2.addWeighted(
+                        self.template, 1 - self.template_update_rate,
+                        cv2.resize(new_template, (self.template.shape[1], self.template.shape[0])),
+                        self.template_update_rate, 0
+                    )
+                    self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
         
         return True, self.bbox
 
@@ -444,10 +620,8 @@ def process_new_coordinate(frame):
                 tracker = nanotrack_model
                 print("Using NanoTrack for tracking")
             else:
-                tracker = None
-                print("NanoTrack not available, tracking disabled")
-                tracking = False
-                return
+                tracker = RobustPitchTracker()
+                print("Using Template Matching for tracking")
             
             success = tracker.init(frame, point)
             
