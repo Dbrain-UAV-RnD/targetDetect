@@ -20,6 +20,7 @@ current_frame = None
 roi = None
 tracker = None
 tracking = False
+kalman = None
 latest_point = None
 new_point_received = False
 target_selected = False
@@ -27,13 +28,8 @@ serial_port = None
 zoom_level = 1.0
 zoom_command = None
 zoom_center = None
-center_x = 0
-center_y = 0
-prev_center_x = 0
-prev_center_y = 0
-velocity_x = 0
-velocity_y = 0
-tracker_fail_count = 0
+failed_frames = 0
+max_failed_frames = 10  # 추가: 연속 실패 프레임 제한
 
 def camera_init(capture, resolution_index=0):
     if capture.isOpened():
@@ -187,38 +183,55 @@ def udp_receiver():
         udp_socket.close()
 
 def process_new_coordinate(frame):
-    global latest_point, new_point_received, tracker, tracking, roi, current_frame, zoom_level, center_x, center_y, prev_center_x, prev_center_y, velocity_x, velocity_y, tracker_fail_count
+    global latest_point, new_point_received, tracker, tracking, roi, current_frame, kalman, zoom_level, failed_frames
     if new_point_received:
         new_point_received = False
         x, y = latest_point
         current_frame = frame.copy()
         
         if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-            roi_size = int(100 / zoom_level)
-            left = max(0, x - roi_size // 2)
-            top = max(0, y - roi_size // 2)
-            right = min(frame.shape[1], x + roi_size // 2)
-            bottom = min(frame.shape[0], y + roi_size // 2)
+            roi_size = int(100 / zoom_level)  # zoom_level 고려 ROI 크기
+            half_size = roi_size // 2
+            left = max(0, x - half_size)
+            top = max(0, y - half_size)
+            right = min(frame.shape[1], x + half_size)
+            bottom = min(frame.shape[0], y + half_size)
+            
+            # 경계에서 ROI 크기 유지 (고정 크기 강제)
+            if right - left < roi_size:
+                if left == 0:
+                    right = min(roi_size, frame.shape[1])
+                else:
+                    left = max(0, right - roi_size)
+            
+            if bottom - top < roi_size:
+                if top == 0:
+                    bottom = min(roi_size, frame.shape[0])
+                else:
+                    top = max(0, bottom - roi_size)
+            
             roi = (left, top, right - left, bottom - top)
             
-            center_x = left + (right - left) / 2
-            center_y = top + (bottom - top) / 2
-            
-            # 초기화 시 속도와 이전 위치 리셋
-            prev_center_x = center_x
-            prev_center_y = center_y
-            velocity_x = 0
-            velocity_y = 0
-            tracker_fail_count = 0
-            
-            tracker = cv2.TrackerCSRT_create()
+            tracker = cv2.TrackerKCF_create()
             tracker.init(frame, roi)
             tracking = True
+            failed_frames = 0  # 실패 카운터 리셋
+            
+            kalman = cv2.KalmanFilter(4, 2)
+            kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+            kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
+            kalman.processNoiseCov = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32) * 0.01  # process noise 줄임 (더 부드럽게)
+            kalman.measurementNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * 0.5  # measurement noise 증가 (측정값 덜 신뢰)
+
+            center_x = left + (right - left) / 2
+            center_y = top + (bottom - top) / 2
+            kalman.statePre = np.array([[center_x], [center_y], [0], [0]], np.float32)
+            kalman.statePost = np.array([[center_x], [center_y], [0], [0]], np.float32)
         else:
             pass
 
 def main():
-    global current_frame, tracker, tracking, roi, target_selected, serial_port, zoom_level, zoom_command, zoom_center
+    global current_frame, tracker, tracking, roi, target_selected, kalman, serial_port, zoom_level, zoom_command, zoom_center, failed_frames
     
     serial_port = setup_serial()
     
@@ -274,12 +287,10 @@ def main():
     serial_interval = 1.0 / 25.0
     
     original_frame = None
-    frame_counter = 0
 
     try:
         while True:
             ret, frame = cap.read()
-            frame_counter += 1
             
             if not ret:
                 time.sleep(0.1)
@@ -297,57 +308,42 @@ def main():
             
             current_frame = original_frame.copy()
             
-            if frame_counter % 3 == 0:
-                process_new_coordinate(original_frame)
+            process_new_coordinate(original_frame)
             
+            center_x, center_y = 0, 0
+            pred_x, pred_y = 0, 0
             
             if not target_selected:
                 tracking = False
-                center_x = 0
-                center_y = 0
-                prev_center_x = 0 
-                prev_center_y = 0
-                velocity_x = 0
-                velocity_y = 0
+                failed_frames = 0
 
-            if tracking and tracker is not None:
-                if frame_counter % 3 == 0:
-                    success, bbox = tracker.update(original_frame)
-                    if success:
-                        x, y, w, h = [int(v) for v in bbox]
-                        roi = (x, y, w, h)
-                        
-                        # 이전 중심점 저장
-                        prev_center_x = center_x
-                        prev_center_y = center_y
-                        
-                        # 새로운 중심점 계산
-                        center_x = x + w / 2
-                        center_y = y + h / 2
-                        
-                        # 속도 계산 (3프레임 동안의 이동)
-                        # 첫 프레임이거나 이전 위치가 0인 경우 속도를 0으로 설정
-                        if prev_center_x != 0 and prev_center_y != 0:
-                            velocity_x = (center_x - prev_center_x) / 3
-                            velocity_y = (center_y - prev_center_y) / 3
-                        else:
-                            velocity_x = 0
-                            velocity_y = 0
-                        
-                        tracker_fail_count = 0
-                    else:
-                        # 트래커 실패 시 예측된 위치로 이동
-                        center_x += velocity_x * 3
-                        center_y += velocity_y * 3
-                        tracker_fail_count += 1
-                        
-                        # 5번 이상 실패하면 트래킹 중지
-                        if tracker_fail_count > 5:
-                            tracking = False
+            if tracking and tracker is not None and kalman is not None:
+                prediction = kalman.predict()
+                pred_x, pred_y = int(prediction[0]), int(prediction[1])
+
+                success, bbox = tracker.update(original_frame)
+                if success:
+                    x, y, w, h = [int(v) for v in bbox]
+                    # bbox 클립 (이미지 밖으로 나가지 않게)
+                    x = max(0, min(x, original_frame.shape[1] - w))
+                    y = max(0, min(y, original_frame.shape[0] - h))
+                    roi = (x, y, w, h)
+                    center_x = x + w / 2
+                    center_y = y + h / 2
+                    measurement = np.array([[np.float32(center_x)], [np.float32(center_y)]])
+                    kalman.correct(measurement)
+                    failed_frames = 0  # 성공 시 리셋
                 else:
-                    # 중간 프레임에서는 선형 보간으로 위치 예측
-                    center_x += velocity_x
-                    center_y += velocity_y
+                    failed_frames += 1
+                    center_x, center_y = pred_x, pred_y
+                    # 예측 위치도 클립
+                    center_x = max(0, min(center_x, original_frame.shape[1]))
+                    center_y = max(0, min(center_y, original_frame.shape[0]))
+                
+                # 연속 실패 시 트래킹 중지
+                if failed_frames > max_failed_frames:
+                    tracking = False
+                    failed_frames = 0
             
             display_frame = original_frame.copy()
             
@@ -420,6 +416,9 @@ def main():
                 
                 disp_center_x, disp_center_y = original_to_display_coord(int(center_x), int(center_y))
                 cv2.circle(display_frame, (disp_center_x, disp_center_y), 5, (0, 0, 255), -1)
+                
+                disp_pred_x, disp_pred_y = original_to_display_coord(pred_x, pred_y)
+                cv2.circle(display_frame, (disp_pred_x, disp_pred_y), 5, (255, 0, 0), -1)
                 
                 # serial limit
                 # current_time = time.time()
