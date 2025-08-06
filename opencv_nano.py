@@ -542,7 +542,7 @@ def camera_init(capture, resolution_index=0):
 def setup_serial():
     try:
         ser = serial.Serial(
-            port='/dev/serial0',
+            port='/dev/ttyTHS1',
             baudrate=57600,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
