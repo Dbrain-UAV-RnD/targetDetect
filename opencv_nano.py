@@ -34,14 +34,33 @@ max_failed_frames = 10  # 추가: 연속 실패 프레임 제한
 
 class NanoTracker:
     def __init__(self, backbone_param, backbone_bin, head_param, head_bin):
-        # NCNN 모델 로드
-        self.backbone = ncnn.Net()
-        self.backbone.load_param(backbone_param)
-        self.backbone.load_model(backbone_bin)
+        # 파일 존재 확인
+        if not all(os.path.exists(f) for f in [backbone_param, backbone_bin, head_param, head_bin]):
+            raise FileNotFoundError("Model files not found!")
         
-        self.head = ncnn.Net()
-        self.head.load_param(head_param)
-        self.head.load_model(head_bin)
+        # NCNN 모델 로드 (에러 처리 추가)
+        try:
+            self.backbone = ncnn.Net()
+            ret = self.backbone.load_param(backbone_param)
+            if ret != 0:
+                raise RuntimeError(f"Failed to load param: {backbone_param}")
+            ret = self.backbone.load_model(backbone_bin)
+            if ret != 0:
+                raise RuntimeError(f"Failed to load model: {backbone_bin}")
+            
+            self.head = ncnn.Net()
+            ret = self.head.load_param(head_param)
+            if ret != 0:
+                raise RuntimeError(f"Failed to load param: {head_param}")
+            ret = self.head.load_model(head_bin)
+            if ret != 0:
+                raise RuntimeError(f"Failed to load model: {head_bin}")
+                
+            print("✓ Models loaded successfully")
+            
+        except Exception as e:
+            print(f"Error loading models: {e}")
+            raise
         
         self.template_feat = None
         self.window = None
@@ -308,10 +327,10 @@ def process_new_coordinate(frame):
             # tracker = cv2.TrackerKCF_create()
 
             tracker = NanoTracker(
-                "/models/nanotrack_backbone_sim.param",
-                "/models/nanotrack_backbone_sim.bin",
-                "/models/nanotrack_head_sim.param",
-                "/models/nanotrack_head_sim.bin"
+                "./models/nanotrack_backbone_sim.param",
+                "./models/nanotrack_backbone_sim.bin",
+                "./models/nanotrack_head_sim.param",
+                "./models/nanotrack_head_sim.bin"
             )
 
             tracker.init(frame, roi)
