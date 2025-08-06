@@ -9,12 +9,22 @@ import gi
 import os
 import math
 
-# NCNN Python bindings
+# NCNN Python bindings - try different import methods
 try:
-    from ncnn import ncnn
+    import ncnn
+    print("Using ncnn module")
 except ImportError:
-    print("Please install ncnn-python: pip install ncnn")
-    exit(1)
+    try:
+        from ncnn import ncnn
+        print("Using ncnn.ncnn module")
+    except ImportError:
+        print("Please install ncnn-python:")
+        print("  pip install ncnn")
+        print("  or")
+        print("  pip install ncnn-vulkan")
+        print("  or for ARM platforms:")
+        print("  pip install ncnn-arm")
+        exit(1)
 
 # Set GStreamer plugin path
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
@@ -51,30 +61,41 @@ class NanoTrack:
             'lr': 0.33
         }
         
-        # Load models with proper thread settings
-        self.net_backbone = ncnn.Net()
-        self.net_backbone.opt.num_threads = 1  # Set threads before loading param
-        self.net_backbone.opt.use_local_pool_allocator = True
-        self.net_backbone.opt.use_blob_allocator = True
-        
-        # Enable GPU if available and requested
-        if use_gpu and ncnn.get_gpu_count() > 0:
-            self.net_backbone.opt.use_vulkan_compute = True
-            print(f"Using GPU acceleration (Vulkan)")
-        
-        self.net_backbone.load_param(f"{model_path}/nanotrack_backbone_sim.param")
-        self.net_backbone.load_model(f"{model_path}/nanotrack_backbone_sim.bin")
-        
-        self.net_head = ncnn.Net()
-        self.net_head.opt.num_threads = 1  # Set threads before loading param
-        self.net_head.opt.use_local_pool_allocator = True
-        self.net_head.opt.use_blob_allocator = True
-        
-        if use_gpu and ncnn.get_gpu_count() > 0:
-            self.net_head.opt.use_vulkan_compute = True
+        try:
+            # Load models with basic settings
+            self.net_backbone = ncnn.Net()
             
-        self.net_head.load_param(f"{model_path}/nanotrack_head_sim.param")
-        self.net_head.load_model(f"{model_path}/nanotrack_head_sim.bin")
+            # Set only the commonly available options
+            self.net_backbone.opt.num_threads = 1  # Set threads before loading param
+            
+            # Try to enable GPU if available and requested
+            if use_gpu:
+                try:
+                    if hasattr(self.net_backbone.opt, 'use_vulkan_compute'):
+                        self.net_backbone.opt.use_vulkan_compute = True
+                        print("Using GPU acceleration (Vulkan)")
+                except:
+                    print("GPU acceleration not available")
+            
+            self.net_backbone.load_param(f"{model_path}/nanotrack_backbone_sim.param")
+            self.net_backbone.load_model(f"{model_path}/nanotrack_backbone_sim.bin")
+            
+            self.net_head = ncnn.Net()
+            self.net_head.opt.num_threads = 1  # Set threads before loading param
+            
+            if use_gpu:
+                try:
+                    if hasattr(self.net_head.opt, 'use_vulkan_compute'):
+                        self.net_head.opt.use_vulkan_compute = True
+                except:
+                    pass
+                
+            self.net_head.load_param(f"{model_path}/nanotrack_head_sim.param")
+            self.net_head.load_model(f"{model_path}/nanotrack_head_sim.bin")
+            
+        except Exception as e:
+            print(f"Failed to load NanoTrack models: {e}")
+            raise
         
         self.state = {}
         self.window = None
@@ -150,13 +171,38 @@ class NanoTrack:
                                               int(s_z), avg_chans)
         
         # Convert to NCNN format and extract features
-        ncnn_img = ncnn.Mat.from_pixels(z_crop, ncnn.Mat.PixelType.PIXEL_BGR2RGB, 
-                                        z_crop.shape[1], z_crop.shape[0])
+        # Ensure z_crop is contiguous and uint8
+        z_crop = np.ascontiguousarray(z_crop, dtype=np.uint8)
+        
+        # Create NCNN Mat - API may vary by version
+        try:
+            # Try newer API
+            ncnn_img = ncnn.Mat.from_pixels(z_crop, ncnn.Mat.PixelType.PIXEL_BGR2RGB, 
+                                            z_crop.shape[1], z_crop.shape[0])
+        except:
+            try:
+                # Try without PixelType enum
+                ncnn_img = ncnn.Mat.from_pixels(z_crop, ncnn.Mat.PIXEL_BGR2RGB, 
+                                                z_crop.shape[1], z_crop.shape[0])
+            except:
+                try:
+                    # Try alternative API
+                    ncnn_img = ncnn.Mat(z_crop.shape[1], z_crop.shape[0], z_crop.shape[2])
+                    ncnn_img.from_pixels(z_crop, ncnn.Mat.PIXEL_BGR2RGB)
+                except:
+                    # Fallback to basic Mat creation
+                    ncnn_img = ncnn.Mat(z_crop)
         
         ex_backbone = self.net_backbone.create_extractor()
         
         ex_backbone.input("input", ncnn_img)
-        _, self.zf = ex_backbone.extract("output")
+        
+        # Extract features - API may return different formats
+        result = ex_backbone.extract("output")
+        if isinstance(result, tuple):
+            _, self.zf = result
+        else:
+            self.zf = result
         
         self.state = {
             'channel_ave': avg_chans,
@@ -179,13 +225,38 @@ class NanoTrack:
     def _update(self, x_crops, target_pos, target_sz, scale_z):
         """Update tracker with new frame"""
         # Extract features from search region
-        ncnn_img = ncnn.Mat.from_pixels(x_crops, ncnn.Mat.PixelType.PIXEL_BGR2RGB,
-                                        x_crops.shape[1], x_crops.shape[0])
+        # Ensure x_crops is contiguous and uint8
+        x_crops = np.ascontiguousarray(x_crops, dtype=np.uint8)
+        
+        # Create NCNN Mat - API may vary by version
+        try:
+            # Try newer API
+            ncnn_img = ncnn.Mat.from_pixels(x_crops, ncnn.Mat.PixelType.PIXEL_BGR2RGB,
+                                            x_crops.shape[1], x_crops.shape[0])
+        except:
+            try:
+                # Try without PixelType enum
+                ncnn_img = ncnn.Mat.from_pixels(x_crops, ncnn.Mat.PIXEL_BGR2RGB,
+                                                x_crops.shape[1], x_crops.shape[0])
+            except:
+                try:
+                    # Try alternative API
+                    ncnn_img = ncnn.Mat(x_crops.shape[1], x_crops.shape[0], x_crops.shape[2])
+                    ncnn_img.from_pixels(x_crops, ncnn.Mat.PIXEL_BGR2RGB)
+                except:
+                    # Fallback to basic Mat creation
+                    ncnn_img = ncnn.Mat(x_crops)
         
         ex_backbone = self.net_backbone.create_extractor()
         
         ex_backbone.input("input", ncnn_img)
-        _, xf = ex_backbone.extract("output")
+        
+        # Extract features - API may return different formats
+        result = ex_backbone.extract("output")
+        if isinstance(result, tuple):
+            _, xf = result
+        else:
+            xf = result
         
         # Head network
         ex_head = self.net_head.create_extractor()
@@ -193,8 +264,18 @@ class NanoTrack:
         ex_head.input("input1", self.zf)
         ex_head.input("input2", xf)
         
-        _, cls_score = ex_head.extract("output1")
-        _, bbox_pred = ex_head.extract("output2")
+        # Extract classification and bbox prediction
+        cls_result = ex_head.extract("output1")
+        if isinstance(cls_result, tuple):
+            _, cls_score = cls_result
+        else:
+            cls_score = cls_result
+            
+        bbox_result = ex_head.extract("output2")
+        if isinstance(bbox_result, tuple):
+            _, bbox_pred = bbox_result
+        else:
+            bbox_pred = bbox_result
         
         # Convert to numpy arrays
         cls_score_np = np.array(cls_score).reshape(self.cfg['score_size'], 
