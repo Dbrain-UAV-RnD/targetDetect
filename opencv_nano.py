@@ -34,33 +34,14 @@ max_failed_frames = 10  # 추가: 연속 실패 프레임 제한
 
 class NanoTracker:
     def __init__(self, backbone_param, backbone_bin, head_param, head_bin):
-        # 파일 존재 확인
-        if not all(os.path.exists(f) for f in [backbone_param, backbone_bin, head_param, head_bin]):
-            raise FileNotFoundError("Model files not found!")
+        # NCNN 모델 로드
+        self.backbone = ncnn.Net()
+        self.backbone.load_param(backbone_param)
+        self.backbone.load_model(backbone_bin)
         
-        # NCNN 모델 로드 (에러 처리 추가)
-        try:
-            self.backbone = ncnn.Net()
-            ret = self.backbone.load_param(backbone_param)
-            if ret != 0:
-                raise RuntimeError(f"Failed to load param: {backbone_param}")
-            ret = self.backbone.load_model(backbone_bin)
-            if ret != 0:
-                raise RuntimeError(f"Failed to load model: {backbone_bin}")
-            
-            self.head = ncnn.Net()
-            ret = self.head.load_param(head_param)
-            if ret != 0:
-                raise RuntimeError(f"Failed to load param: {head_param}")
-            ret = self.head.load_model(head_bin)
-            if ret != 0:
-                raise RuntimeError(f"Failed to load model: {head_bin}")
-                
-            print("✓ Models loaded successfully")
-            
-        except Exception as e:
-            print(f"Error loading models: {e}")
-            raise
+        self.head = ncnn.Net()
+        self.head.load_param(head_param)
+        self.head.load_model(head_bin)
         
         self.template_feat = None
         self.window = None
@@ -69,24 +50,16 @@ class NanoTracker:
         """KCF와 동일한 인터페이스"""
         x, y, w, h = roi
         
-        # BGR to RGB 변환 추가
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
         # 템플릿 추출 (127x127)
-        template = self._crop_and_resize(frame_rgb, x, y, w, h, 127)
+        template = self._crop_and_resize(frame, x, y, w, h, 127)
         
         # Backbone으로 특징 추출
         ex = self.backbone.create_extractor()
+        mat_in = ncnn.Mat.from_pixels(template, ncnn.Mat.RGB, 127, 127)
+        ex.input("data", mat_in)
+        _, self.template_feat = ex.extract("output")
         
-        # 정규화 추가 (0-255 -> 0-1)
-        template_norm = template.astype(np.float32) / 255.0
-        mat_in = ncnn.Mat.from_pixels(template_norm, ncnn.Mat.PixelType.RGB, 127, 127)
-        
-        # 실제 레이어 이름 사용 (param 파일 확인 필요)
-        ex.input("input", mat_in)  # "data" 대신 "input" 시도
-        _, self.template_feat = ex.extract("output")  # 또는 "fc" 등
-        
-        # 윈도우 생성
+        # 윈도우 생성 (코사인 윈도우)
         self.window = self._create_window(255)
         self.center = [x + w/2, y + h/2]
         self.size = [w, h]
@@ -333,7 +306,7 @@ def process_new_coordinate(frame):
             roi = (left, top, right - left, bottom - top)
             
             # tracker = cv2.TrackerKCF_create()
-
+            
             tracker = NanoTracker(
                 "./models/nanotrack_backbone_sim.param",
                 "./models/nanotrack_backbone_sim.bin",
