@@ -1,3 +1,4 @@
+```python
 import cv2
 import socket
 import threading
@@ -34,16 +35,16 @@ class NanoTrack:
                  head_bin_path="./models/nanotrack_head_sim.bin",
                  fixed_roi_size=100):  # 고정 ROI 크기 추가
         
-        # Configuration
+        # Configuration (튜닝된 파라미터: window_influence 줄임, penalty_k 증가, lr 줄임)
         self.cfg = {
             'context_amount': 0.5,
             'exemplar_size': 127,
             'instance_size': 255,
             'score_size': 16,
             'total_stride': 16,
-            'window_influence': 0.42,
-            'penalty_k': 0.04,
-            'lr': 0.34,
+            'window_influence': 0.30,  # 줄여서 penalty에 더 의존하게 함 (jitter 감소)
+            'penalty_k': 0.06,         # 증가시켜 크기 변화에 더 엄격하게 (tracking 안정성 향상)
+            'lr': 0.28,                # 줄여서 위치 업데이트를 더 부드럽게 (jitter 감소)
             'fixed_roi_size': fixed_roi_size,  # 고정 ROI 크기
             'enable_size_update': False  # 크기 업데이트 비활성화
         }
@@ -81,10 +82,14 @@ class NanoTrack:
         self.im_h = 0
         self.im_w = 0
         
-        # 실패 추적용 (RobustPitchTracker 호환성)
+        # 실패 추적용 (RobustPitchTracker 호환성) - confidence_threshold 증가로 안정성 향상
         self.failed_frames = 0
         self.max_failed_frames = 10
-        self.confidence_threshold = 0.2
+        self.confidence_threshold = 0.25  # 증가시켜 낮은 신뢰도 예측 무시 (tracking 성능 향상)
+        
+        # 위치 스무딩을 위한 변수 추가 (jitter 감소)
+        self.smooth_factor = 0.7  # 이전 위치와 새 위치를 블렌딩 (0.0: 완전 새 위치, 1.0: 이전 위치 유지)
+        self.prev_center = None
         
         # 윈도우와 그리드 생성
         self._create_window()
@@ -168,6 +173,7 @@ class NanoTrack:
         
         # NanoTrack 초기화
         self.center = [x + w//2, y + h//2]
+        self.prev_center = self.center.copy()  # 스무딩 초기화
         self.target_sz = [w, h]
         self.initial_sz = [w, h]  # 초기 크기 저장 (고정용)
         
@@ -300,9 +306,12 @@ class NanoTrack:
         # Learning rate
         lr = penalty[best_idx] * best_score * self.cfg['lr']
         
-        # 중심점 업데이트
-        self.center[0] += diff_xs
-        self.center[1] += diff_ys
+        # 중심점 업데이트 (스무딩 적용)
+        new_center_x = self.prev_center[0] + diff_xs * (1 - self.smooth_factor) + self.prev_center[0] * self.smooth_factor
+        new_center_y = self.prev_center[1] + diff_ys * (1 - self.smooth_factor) + self.prev_center[1] * self.smooth_factor
+        self.center[0] = new_center_x
+        self.center[1] = new_center_y
+        self.prev_center = self.center.copy()
         
         # 크기 업데이트 (옵션에 따라)
         if self.cfg['enable_size_update']:
@@ -340,14 +349,14 @@ class RobustPitchTracker:
         self.fixed_roi_size = fixed_roi_size  # 고정 ROI 크기
         self.initial_template_size = None  # 초기 템플릿 크기 저장
         
-        self.search_scale = 3.0
-        self.confidence_threshold = 0.2
-        self.template_update_rate = 0.05
+        self.search_scale = 3.5  # 증가시켜 검색 영역 확대 (tracking 성능 향상)
+        self.confidence_threshold = 0.25  # 증가시켜 낮은 신뢰도 무시 (tracking 안정성 향상)
+        self.template_update_rate = 0.03  # 줄여서 템플릿 업데이트를 더 천천히 (jitter 감소)
         
         self.max_movement_ratio = 0.5
         self.velocity_x = 0
         self.velocity_y = 0
-        self.velocity_decay = 0.8
+        self.velocity_decay = 0.85  # 증가시켜 속도 감쇠를 더 부드럽게 (jitter 감소)
         
         self.failed_frames = 0
         self.max_failed_frames = 10
@@ -355,6 +364,10 @@ class RobustPitchTracker:
         self.prev_center_y = 0
         self.pitch_down_threshold = 50
         
+        # 위치 스무딩을 위한 변수 추가 (jitter 감소)
+        self.smooth_factor = 0.7  # 이전 위치와 새 위치를 블렌딩
+        self.prev_center = None
+    
     def simple_roi_selection(self, frame, point, roi_size=None):
         """ROI 선택 (고정 크기)"""
         if roi_size is None:
@@ -394,6 +407,7 @@ class RobustPitchTracker:
         self.initial_template_size = (w, h)  # 초기 크기 저장
         
         self.center = [x + w//2, y + h//2]
+        self.prev_center = self.center.copy()  # 스무딩 초기화
         self.prev_center_y = self.center[1]
         
         self.velocity_x = 0
@@ -464,6 +478,10 @@ class RobustPitchTracker:
         new_center_x = search_x1 + best_loc[0] + template_w // 2
         new_center_y = search_y1 + best_loc[1] + template_h // 2
         
+        # 스무딩 적용
+        new_center_x = new_center_x * (1 - self.smooth_factor) + self.prev_center[0] * self.smooth_factor
+        new_center_y = new_center_y * (1 - self.smooth_factor) + self.prev_center[1] * self.smooth_factor
+        
         self.velocity_x = new_center_x - self.center[0]
         self.velocity_y = new_center_y - self.center[1]
         
@@ -480,6 +498,7 @@ class RobustPitchTracker:
         
         self.center[0] = new_center_x
         self.center[1] = new_center_y
+        self.prev_center = self.center.copy()
         
         self.velocity_x *= self.velocity_decay
         self.velocity_y *= self.velocity_decay
@@ -933,3 +952,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
