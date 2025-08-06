@@ -537,7 +537,7 @@ def process_new_coordinate(frame):
         current_frame = frame.copy()
         
         if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-            roi_size = int(100 / zoom_level)
+            roi_size = int(500 / zoom_level)
             left = max(0, x - roi_size // 2)
             top = max(0, y - roi_size // 2)
             right = min(frame.shape[1], x + roi_size // 2)
