@@ -13,6 +13,7 @@ import math
 try:
     import ncnn
     NCNN_AVAILABLE = True
+    print(f"NCNN version: {ncnn.__version__ if hasattr(ncnn, '__version__') else 'unknown'}")
 except ImportError:
     print("Warning: NCNN not available, falling back to template matching")
     NCNN_AVAILABLE = False
@@ -46,16 +47,24 @@ class NanoTrack:
         
         # NCNN 모델 로드 (스레드 설정을 load_param 전에)
         self.net_backbone = ncnn.Net()
-        self.net_backbone.opt.num_threads = 1  # load_param 전에 설정
-        self.net_backbone.opt.use_local_pool_allocator = True
-        self.net_backbone.opt.use_vulkan_compute = False  # CPU 사용
+        try:
+            # 버전에 따라 사용 가능한 옵션 설정
+            self.net_backbone.opt.num_threads = 1
+            if hasattr(self.net_backbone.opt, 'use_vulkan_compute'):
+                self.net_backbone.opt.use_vulkan_compute = False
+        except:
+            pass  # 옵션 설정 실패해도 기본값으로 진행
         self.net_backbone.load_param(backbone_param_path)
         self.net_backbone.load_model(backbone_bin_path)
         
         self.net_head = ncnn.Net()
-        self.net_head.opt.num_threads = 1  # load_param 전에 설정
-        self.net_head.opt.use_local_pool_allocator = True
-        self.net_head.opt.use_vulkan_compute = False  # CPU 사용
+        try:
+            # 버전에 따라 사용 가능한 옵션 설정
+            self.net_head.opt.num_threads = 1
+            if hasattr(self.net_head.opt, 'use_vulkan_compute'):
+                self.net_head.opt.use_vulkan_compute = False
+        except:
+            pass  # 옵션 설정 실패해도 기본값으로 진행
         self.net_head.load_param(head_param_path)
         self.net_head.load_model(head_bin_path)
         
@@ -709,9 +718,10 @@ def main():
                 head_bin_path="./models/nanotrack_head_sim.bin"
             )
             print("NanoTrack models loaded successfully!")
+            USE_NANOTRACK = True
         except Exception as e:
-            print(f"Failed to load NanoTrack models: {e}")
-            print("Falling back to template matching")
+            print(f"Warning: Could not load NanoTrack models: {e}")
+            print("Falling back to template matching tracker")
             USE_NANOTRACK = False
             nanotrack_model = None
     
