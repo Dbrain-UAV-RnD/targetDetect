@@ -212,7 +212,7 @@ def process_new_coordinate(frame):
             
             roi = (left, top, right - left, bottom - top)
             
-            tracker = cv2.TrackerKCF_create()
+            tracker = cv2.TrackerCSRT_create()
             tracker.init(frame, roi)
             tracking = True
             failed_frames = 0  # 실패 카운터 리셋
