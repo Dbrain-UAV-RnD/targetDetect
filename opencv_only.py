@@ -221,7 +221,7 @@ def process_new_coordinate(frame):
             kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
             kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
             kalman.processNoiseCov = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32) * 0.01  # process noise 줄임 (더 부드럽게)
-            kalman.measurementNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * 0.5  # measurement noise 증가 (측정값 덜 신뢰)
+            kalman.measurementNoiseCov = np.array([[1, 0], [0, 1]], np.float32) * 0.3  # measurement noise 증가 (측정값 덜 신뢰)
 
             center_x = left + (right - left) / 2
             center_y = top + (bottom - top) / 2
