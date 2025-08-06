@@ -44,12 +44,18 @@ class NanoTrack:
             'lr': 0.34
         }
         
-        # NCNN 모델 로드
+        # NCNN 모델 로드 (스레드 설정을 load_param 전에)
         self.net_backbone = ncnn.Net()
+        self.net_backbone.opt.num_threads = 1  # load_param 전에 설정
+        self.net_backbone.opt.use_local_pool_allocator = True
+        self.net_backbone.opt.use_vulkan_compute = False  # CPU 사용
         self.net_backbone.load_param(backbone_param_path)
         self.net_backbone.load_model(backbone_bin_path)
         
         self.net_head = ncnn.Net()
+        self.net_head.opt.num_threads = 1  # load_param 전에 설정
+        self.net_head.opt.use_local_pool_allocator = True
+        self.net_head.opt.use_vulkan_compute = False  # CPU 사용
         self.net_head.load_param(head_param_path)
         self.net_head.load_model(head_bin_path)
         
@@ -162,8 +168,7 @@ class NanoTrack:
         
         # NCNN으로 특징 추출
         ex = self.net_backbone.create_extractor()
-        ex.set_light_mode(True)
-        ex.set_num_threads(1)
+        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
         
         # BGR to RGB 변환 후 입력
         z_crop_rgb = cv2.cvtColor(z_crop, cv2.COLOR_BGR2RGB)
@@ -200,8 +205,7 @@ class NanoTrack:
         
         # 특징 추출 (backbone)
         ex_backbone = self.net_backbone.create_extractor()
-        ex_backbone.set_light_mode(True)
-        ex_backbone.set_num_threads(1)
+        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
         
         x_crop_rgb = cv2.cvtColor(x_crop, cv2.COLOR_BGR2RGB)
         mat_in = ncnn.Mat.from_pixels(x_crop_rgb, ncnn.Mat.PixelType.PIXEL_RGB,
@@ -212,8 +216,7 @@ class NanoTrack:
         
         # Head 네트워크로 예측
         ex_head = self.net_head.create_extractor()
-        ex_head.set_light_mode(True)
-        ex_head.set_num_threads(1)
+        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
         
         ex_head.input("input1", self.zf)
         ex_head.input("input2", xf)
