@@ -37,15 +37,19 @@ class NanoTrack:
         
         self.net_backbone = ncnn.Net()
         self.net_backbone.opt.num_threads = 2
-        self.net_backbone.opt.use_local_pool_allocator = True
-        self.net_backbone.opt.use_vulkan_compute = False
+        try:
+            self.net_backbone.opt.use_vulkan_compute = False
+        except:
+            pass
         self.net_backbone.load_param(backbone_param_path)
         self.net_backbone.load_model(backbone_bin_path)
         
         self.net_head = ncnn.Net()
         self.net_head.opt.num_threads = 2
-        self.net_head.opt.use_local_pool_allocator = True
-        self.net_head.opt.use_vulkan_compute = False
+        try:
+            self.net_head.opt.use_vulkan_compute = False
+        except:
+            pass
         self.net_head.load_param(head_param_path)
         self.net_head.load_model(head_bin_path)
         
