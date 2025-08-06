@@ -39,7 +39,7 @@ zoom_command = None
 zoom_center = None
 
 class NanoTrack:
-    def __init__(self, model_path="models"):
+    def __init__(self, model_path="models", use_gpu=False):
         self.cfg = {
             'context_amount': 0.5,
             'exemplar_size': 127,
@@ -51,12 +51,28 @@ class NanoTrack:
             'lr': 0.33
         }
         
-        # Load models
+        # Load models with proper thread settings
         self.net_backbone = ncnn.Net()
+        self.net_backbone.opt.num_threads = 1  # Set threads before loading param
+        self.net_backbone.opt.use_local_pool_allocator = True
+        self.net_backbone.opt.use_blob_allocator = True
+        
+        # Enable GPU if available and requested
+        if use_gpu and ncnn.get_gpu_count() > 0:
+            self.net_backbone.opt.use_vulkan_compute = True
+            print(f"Using GPU acceleration (Vulkan)")
+        
         self.net_backbone.load_param(f"{model_path}/nanotrack_backbone_sim.param")
         self.net_backbone.load_model(f"{model_path}/nanotrack_backbone_sim.bin")
         
         self.net_head = ncnn.Net()
+        self.net_head.opt.num_threads = 1  # Set threads before loading param
+        self.net_head.opt.use_local_pool_allocator = True
+        self.net_head.opt.use_blob_allocator = True
+        
+        if use_gpu and ncnn.get_gpu_count() > 0:
+            self.net_head.opt.use_vulkan_compute = True
+            
         self.net_head.load_param(f"{model_path}/nanotrack_head_sim.param")
         self.net_head.load_model(f"{model_path}/nanotrack_head_sim.bin")
         
@@ -138,8 +154,6 @@ class NanoTrack:
                                         z_crop.shape[1], z_crop.shape[0])
         
         ex_backbone = self.net_backbone.create_extractor()
-        ex_backbone.set_light_mode(True)
-        ex_backbone.set_num_threads(1)
         
         ex_backbone.input("input", ncnn_img)
         _, self.zf = ex_backbone.extract("output")
@@ -169,16 +183,12 @@ class NanoTrack:
                                         x_crops.shape[1], x_crops.shape[0])
         
         ex_backbone = self.net_backbone.create_extractor()
-        ex_backbone.set_light_mode(True)
-        ex_backbone.set_num_threads(1)
         
         ex_backbone.input("input", ncnn_img)
         _, xf = ex_backbone.extract("output")
         
         # Head network
         ex_head = self.net_head.create_extractor()
-        ex_head.set_light_mode(True)
-        ex_head.set_num_threads(1)
         
         ex_head.input("input1", self.zf)
         ex_head.input("input2", xf)
@@ -454,7 +464,7 @@ def process_new_coordinate(frame):
             roi = (left, top, right - left, bottom - top)
             
             # Initialize NanoTrack instead of KCF
-            tracker = NanoTrack(model_path="models")
+            tracker = NanoTrack(model_path="models", use_gpu=False)  # Set use_gpu=True for GPU acceleration
             tracker.init(frame, roi)
             tracking = True
             
