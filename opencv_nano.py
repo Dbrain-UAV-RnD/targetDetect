@@ -31,7 +31,8 @@ class NanoTrack:
     def __init__(self, backbone_param_path="./models/nanotrack_backbone_sim.param",
                  backbone_bin_path="./models/nanotrack_backbone_sim.bin",
                  head_param_path="./models/nanotrack_head_sim.param",
-                 head_bin_path="./models/nanotrack_head_sim.bin"):
+                 head_bin_path="./models/nanotrack_head_sim.bin",
+                 fixed_roi_size=100):  # 고정 ROI 크기 추가
         
         # Configuration
         self.cfg = {
@@ -42,7 +43,9 @@ class NanoTrack:
             'total_stride': 16,
             'window_influence': 0.42,
             'penalty_k': 0.04,
-            'lr': 0.34
+            'lr': 0.34,
+            'fixed_roi_size': fixed_roi_size,  # 고정 ROI 크기
+            'enable_size_update': False  # 크기 업데이트 비활성화
         }
         
         # NCNN 모델 로드 (스레드 설정을 load_param 전에)
@@ -71,6 +74,7 @@ class NanoTrack:
         # 상태 변수
         self.center = None
         self.target_sz = None
+        self.initial_sz = None  # 초기 크기 저장용
         self.bbox = None
         self.zf = None
         self.channel_ave = None
@@ -128,10 +132,12 @@ class NanoTrack:
         im_patch = cv2.resize(im_patch, (model_sz, model_sz))
         return im_patch
     
-    def simple_roi_selection(self, frame, point, roi_size=100):
-        """RobustPitchTracker 호환 ROI 선택"""
-        x, y = int(point[0]), int(point[1])
+    def simple_roi_selection(self, frame, point, roi_size=None):
+        """ROI 선택 (고정 크기)"""
+        if roi_size is None:
+            roi_size = self.cfg['fixed_roi_size']
         
+        x, y = int(point[0]), int(point[1])
         half_size = roi_size // 2
         
         x1 = max(0, x - half_size)
@@ -139,27 +145,31 @@ class NanoTrack:
         x2 = min(frame.shape[1], x + half_size)
         y2 = min(frame.shape[0], y + half_size)
         
-        actual_w = x2 - x1
-        actual_h = y2 - y1
+        # 경계에서도 ROI 크기 유지
+        if x2 - x1 < roi_size:
+            if x1 == 0:
+                x2 = min(roi_size, frame.shape[1])
+            else:
+                x1 = max(0, x2 - roi_size)
         
-        if actual_w < 60 or actual_h < 60:
-            roi_size = 60
-            half_size = roi_size // 2
-            x1 = max(0, min(x - half_size, frame.shape[1] - roi_size))
-            y1 = max(0, min(y - half_size, frame.shape[0] - roi_size))
-            actual_w = actual_h = roi_size
+        if y2 - y1 < roi_size:
+            if y1 == 0:
+                y2 = min(roi_size, frame.shape[0])
+            else:
+                y1 = max(0, y2 - roi_size)
         
-        print(f"ROI selected: ({x1}, {y1}, {actual_w}, {actual_h}) at click point ({x}, {y})")
-        return (x1, y1, actual_w, actual_h)
+        print(f"Fixed ROI: ({x1}, {y1}, {roi_size}, {roi_size}) at click point ({x}, {y})")
+        return (x1, y1, roi_size, roi_size)
         
     def init(self, frame, point):
-        """트래커 초기화 (RobustPitchTracker와 동일한 인터페이스)"""
+        """트래커 초기화 (고정 ROI 크기)"""
         self.bbox = self.simple_roi_selection(frame, point)
         x, y, w, h = self.bbox
         
         # NanoTrack 초기화
         self.center = [x + w//2, y + h//2]
         self.target_sz = [w, h]
+        self.initial_sz = [w, h]  # 초기 크기 저장 (고정용)
         
         # 이미지 정보 저장
         self.im_h = frame.shape[0]
@@ -189,7 +199,7 @@ class NanoTrack:
         
         self.failed_frames = 0
         
-        print(f"NanoTrack initialized at {self.center} with bbox {self.bbox}")
+        print(f"NanoTrack initialized with fixed ROI size: {w}x{h}")
         return True
         
     def update(self, frame):
@@ -294,17 +304,20 @@ class NanoTrack:
         self.center[0] += diff_xs
         self.center[1] += diff_ys
         
-        # 크기 업데이트
-        self.target_sz[0] = self.target_sz[0] * (1 - lr) + pred_w / scale_z * lr
-        self.target_sz[1] = self.target_sz[1] * (1 - lr) + pred_h / scale_z * lr
+        # 크기 업데이트 (옵션에 따라)
+        if self.cfg['enable_size_update']:
+            # 크기 업데이트 활성화 시
+            self.target_sz[0] = self.target_sz[0] * (1 - lr) + pred_w / scale_z * lr
+            self.target_sz[1] = self.target_sz[1] * (1 - lr) + pred_h / scale_z * lr
+        else:
+            # 크기 고정 (초기 크기 유지)
+            self.target_sz = self.initial_sz.copy()
         
         # 경계 체크
         self.center[0] = np.clip(self.center[0], 0, self.im_w)
         self.center[1] = np.clip(self.center[1], 0, self.im_h)
-        self.target_sz[0] = np.clip(self.target_sz[0], 10, self.im_w)
-        self.target_sz[1] = np.clip(self.target_sz[1], 10, self.im_h)
         
-        # 바운딩 박스 계산
+        # 바운딩 박스 계산 (고정 크기)
         self.bbox = (
             int(self.center[0] - self.target_sz[0] / 2),
             int(self.center[1] - self.target_sz[1] / 2),
@@ -318,11 +331,14 @@ class NanoTrack:
 class RobustPitchTracker:
     """폴백용 템플릿 매칭 트래커 (NCNN이 없을 경우)"""
     
-    def __init__(self):
+    def __init__(self, fixed_roi_size=100):
         self.template = None
         self.template_gray = None
         self.bbox = None
         self.center = None
+        
+        self.fixed_roi_size = fixed_roi_size  # 고정 ROI 크기
+        self.initial_template_size = None  # 초기 템플릿 크기 저장
         
         self.search_scale = 3.0
         self.confidence_threshold = 0.2
@@ -339,9 +355,12 @@ class RobustPitchTracker:
         self.prev_center_y = 0
         self.pitch_down_threshold = 50
         
-    def simple_roi_selection(self, frame, point, roi_size=100):
+    def simple_roi_selection(self, frame, point, roi_size=None):
+        """ROI 선택 (고정 크기)"""
+        if roi_size is None:
+            roi_size = self.fixed_roi_size
+            
         x, y = int(point[0]), int(point[1])
-        
         half_size = roi_size // 2
         
         x1 = max(0, x - half_size)
@@ -349,25 +368,30 @@ class RobustPitchTracker:
         x2 = min(frame.shape[1], x + half_size)
         y2 = min(frame.shape[0], y + half_size)
         
-        actual_w = x2 - x1
-        actual_h = y2 - y1
+        # 경계에서도 ROI 크기 유지
+        if x2 - x1 < roi_size:
+            if x1 == 0:
+                x2 = min(roi_size, frame.shape[1])
+            else:
+                x1 = max(0, x2 - roi_size)
         
-        if actual_w < 60 or actual_h < 60:
-            roi_size = 60
-            half_size = roi_size // 2
-            x1 = max(0, min(x - half_size, frame.shape[1] - roi_size))
-            y1 = max(0, min(y - half_size, frame.shape[0] - roi_size))
-            actual_w = actual_h = roi_size
+        if y2 - y1 < roi_size:
+            if y1 == 0:
+                y2 = min(roi_size, frame.shape[0])
+            else:
+                y1 = max(0, y2 - roi_size)
         
-        print(f"ROI selected: ({x1}, {y1}, {actual_w}, {actual_h}) at click point ({x}, {y})")
-        return (x1, y1, actual_w, actual_h)
+        print(f"Fixed ROI: ({x1}, {y1}, {roi_size}, {roi_size}) at click point ({x}, {y})")
+        return (x1, y1, roi_size, roi_size)
     
     def init(self, frame, point):
+        """트래커 초기화 (고정 ROI 크기)"""
         self.bbox = self.simple_roi_selection(frame, point)
         x, y, w, h = self.bbox
         
         self.template = frame[y:y+h, x:x+w].copy()
         self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
+        self.initial_template_size = (w, h)  # 초기 크기 저장
         
         self.center = [x + w//2, y + h//2]
         self.prev_center_y = self.center[1]
@@ -376,7 +400,7 @@ class RobustPitchTracker:
         self.velocity_y = 0
         self.failed_frames = 0
         
-        print(f"Tracker initialized at {self.center} with bbox {self.bbox}")
+        print(f"Template tracker initialized with fixed ROI size: {w}x{h}")
         return True
     
     def update(self, frame):
@@ -386,7 +410,8 @@ class RobustPitchTracker:
         predicted_x = self.center[0] + self.velocity_x
         predicted_y = self.center[1] + self.velocity_y
         
-        template_w, template_h = self.template.shape[1], self.template.shape[0]
+        # 고정 템플릿 크기 사용
+        template_w, template_h = self.initial_template_size
         search_w = int(template_w * self.search_scale)
         search_h = int(template_h * self.search_scale)
         
@@ -403,28 +428,9 @@ class RobustPitchTracker:
         
         search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
         
-        best_score = -1
-        best_loc = None
-        best_scale = 1.0
-        
-        scales = [0.8, 0.9, 1.0, 1.1, 1.2]
-        
-        for scale in scales:
-            scaled_w = int(self.template_gray.shape[1] * scale)
-            scaled_h = int(self.template_gray.shape[0] * scale)
-            
-            if scaled_w > search_gray.shape[1] or scaled_h > search_gray.shape[0]:
-                continue
-                
-            scaled_template = cv2.resize(self.template_gray, (scaled_w, scaled_h))
-            
-            result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            
-            if max_val > best_score:
-                best_score = max_val
-                best_loc = max_loc
-                best_scale = scale
+        # 템플릿은 고정 크기로 매칭 (스케일 변화 없음)
+        result = cv2.matchTemplate(search_gray, self.template_gray, cv2.TM_CCOEFF_NORMED)
+        _, best_score, _, best_loc = cv2.minMaxLoc(result)
         
         if best_score < self.confidence_threshold:
             self.failed_frames += 1
@@ -439,6 +445,7 @@ class RobustPitchTracker:
                 self.center[0] = max(template_w//2, min(self.center[0], frame.shape[1] - template_w//2))
                 self.center[1] = max(template_h//2, min(self.center[1], frame.shape[0] - template_h//2))
                 
+                # 고정 크기 bbox
                 self.bbox = (
                     int(self.center[0] - template_w//2),
                     int(self.center[1] - template_h//2),
@@ -453,11 +460,9 @@ class RobustPitchTracker:
         
         self.failed_frames = 0
         
-        template_w_scaled = int(self.template_gray.shape[1] * best_scale)
-        template_h_scaled = int(self.template_gray.shape[0] * best_scale)
-        
-        new_center_x = search_x1 + best_loc[0] + template_w_scaled // 2
-        new_center_y = search_y1 + best_loc[1] + template_h_scaled // 2
+        # 새 중심점 계산
+        new_center_x = search_x1 + best_loc[0] + template_w // 2
+        new_center_y = search_y1 + best_loc[1] + template_h // 2
         
         self.velocity_x = new_center_x - self.center[0]
         self.velocity_y = new_center_y - self.center[1]
@@ -479,24 +484,23 @@ class RobustPitchTracker:
         self.velocity_x *= self.velocity_decay
         self.velocity_y *= self.velocity_decay
         
-        new_w = int(template_w_scaled)
-        new_h = int(template_h_scaled)
-        
+        # 고정 크기 bbox
         self.bbox = (
-            int(self.center[0] - new_w//2),
-            int(self.center[1] - new_h//2),
-            new_w,
-            new_h
+            int(self.center[0] - template_w//2),
+            int(self.center[1] - template_h//2),
+            template_w,
+            template_h
         )
         
+        # 템플릿 업데이트 (크기는 고정)
         if best_score > 0.6:
             x, y, w, h = self.bbox
             if 0 <= x < frame.shape[1] - w and 0 <= y < frame.shape[0] - h:
                 new_template = frame[y:y+h, x:x+w]
-                if new_template.size > 0:
+                if new_template.size > 0 and new_template.shape == self.template.shape:
                     self.template = cv2.addWeighted(
                         self.template, 1 - self.template_update_rate,
-                        cv2.resize(new_template, (self.template.shape[1], self.template.shape[0])),
+                        new_template,
                         self.template_update_rate, 0
                     )
                     self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
@@ -519,9 +523,12 @@ center_x = 0
 center_y = 0
 bbox = None
 
+# 트래커 설정
+FIXED_ROI_SIZE = 100  # 고정 ROI 크기 (픽셀) - 필요시 조정 가능
+USE_NANOTRACK = NCNN_AVAILABLE  # NCNN 사용 가능 여부에 따라 결정
+
 # NanoTrack 모델 (전역으로 한 번만 로드)
 nanotrack_model = None
-USE_NANOTRACK = NCNN_AVAILABLE  # NCNN 사용 가능 여부에 따라 결정
 
 def camera_init(capture, resolution_index=0):
     if capture.isOpened():
@@ -670,7 +677,7 @@ def udp_receiver():
 
 def process_new_coordinate(frame):
     global latest_point, new_point_received, tracker, tracking, current_frame
-    global center_x, center_y, bbox, USE_NANOTRACK, nanotrack_model
+    global center_x, center_y, bbox, USE_NANOTRACK, nanotrack_model, FIXED_ROI_SIZE
     
     if new_point_received:
         new_point_received = False
@@ -680,13 +687,13 @@ def process_new_coordinate(frame):
         print(f"Processing new coordinate: {point}")
         
         if 0 <= point[0] < frame.shape[1] and 0 <= point[1] < frame.shape[0]:
-            # NanoTrack 또는 템플릿 매칭 선택
+            # NanoTrack 또는 템플릿 매칭 선택 (둘 다 고정 ROI 사용)
             if USE_NANOTRACK and nanotrack_model is not None:
                 tracker = nanotrack_model
-                print("Using NanoTrack for tracking")
+                print(f"Using NanoTrack with fixed ROI size: {FIXED_ROI_SIZE}x{FIXED_ROI_SIZE}")
             else:
-                tracker = RobustPitchTracker()
-                print("Using Template Matching for tracking")
+                tracker = RobustPitchTracker(fixed_roi_size=FIXED_ROI_SIZE)
+                print(f"Using Template Matching with fixed ROI size: {FIXED_ROI_SIZE}x{FIXED_ROI_SIZE}")
             
             success = tracker.init(frame, point)
             
@@ -695,7 +702,7 @@ def process_new_coordinate(frame):
                 bbox = tracker.bbox
                 center_x = bbox[0] + bbox[2] // 2
                 center_y = bbox[1] + bbox[3] // 2
-                print(f"Tracker initialized successfully with bbox: {bbox}")
+                print(f"Tracker initialized successfully with fixed bbox: {bbox}")
             else:
                 tracking = False
                 print("Failed to initialize tracker")
@@ -715,9 +722,10 @@ def main():
                 backbone_param_path="./models/nanotrack_backbone_sim.param",
                 backbone_bin_path="./models/nanotrack_backbone_sim.bin",
                 head_param_path="./models/nanotrack_head_sim.param",
-                head_bin_path="./models/nanotrack_head_sim.bin"
+                head_bin_path="./models/nanotrack_head_sim.bin",
+                fixed_roi_size=FIXED_ROI_SIZE  # 고정 ROI 크기 설정
             )
-            print("NanoTrack models loaded successfully!")
+            print(f"NanoTrack models loaded successfully with fixed ROI size: {FIXED_ROI_SIZE}x{FIXED_ROI_SIZE}")
             USE_NANOTRACK = True
         except Exception as e:
             print(f"Warning: Could not load NanoTrack models: {e}")

@@ -6,6 +6,17 @@ import time
 import serial
 import gi
 import os
+import numpy as np
+import math
+
+# NCNN import 추가
+try:
+    import ncnn
+    NCNN_AVAILABLE = True
+    print(f"NCNN version: {ncnn.__version__ if hasattr(ncnn, '__version__') else 'unknown'}")
+except ImportError:
+    print("Warning: NCNN not available, falling back to template matching")
+    NCNN_AVAILABLE = False
 
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
 
@@ -14,7 +25,298 @@ from gi.repository import Gst
 
 Gst.init(None)
 
+class NanoTrack:
+    """NanoTrack 딥러닝 기반 트래커"""
+    
+    def __init__(self, backbone_param_path="./models/nanotrack_backbone_sim.param",
+                 backbone_bin_path="./models/nanotrack_backbone_sim.bin",
+                 head_param_path="./models/nanotrack_head_sim.param",
+                 head_bin_path="./models/nanotrack_head_sim.bin"):
+        
+        # Configuration
+        self.cfg = {
+            'context_amount': 0.5,
+            'exemplar_size': 127,
+            'instance_size': 255,
+            'score_size': 16,
+            'total_stride': 16,
+            'window_influence': 0.42,
+            'penalty_k': 0.04,
+            'lr': 0.34
+        }
+        
+        # NCNN 모델 로드 (스레드 설정을 load_param 전에)
+        self.net_backbone = ncnn.Net()
+        try:
+            # 버전에 따라 사용 가능한 옵션 설정
+            self.net_backbone.opt.num_threads = 1
+            if hasattr(self.net_backbone.opt, 'use_vulkan_compute'):
+                self.net_backbone.opt.use_vulkan_compute = False
+        except:
+            pass  # 옵션 설정 실패해도 기본값으로 진행
+        self.net_backbone.load_param(backbone_param_path)
+        self.net_backbone.load_model(backbone_bin_path)
+        
+        self.net_head = ncnn.Net()
+        try:
+            # 버전에 따라 사용 가능한 옵션 설정
+            self.net_head.opt.num_threads = 1
+            if hasattr(self.net_head.opt, 'use_vulkan_compute'):
+                self.net_head.opt.use_vulkan_compute = False
+        except:
+            pass  # 옵션 설정 실패해도 기본값으로 진행
+        self.net_head.load_param(head_param_path)
+        self.net_head.load_model(head_bin_path)
+        
+        # 상태 변수
+        self.center = None
+        self.target_sz = None
+        self.bbox = None
+        self.zf = None
+        self.channel_ave = None
+        self.im_h = 0
+        self.im_w = 0
+        
+        # 실패 추적용 (RobustPitchTracker 호환성)
+        self.failed_frames = 0
+        self.max_failed_frames = 10
+        self.confidence_threshold = 0.2
+        
+        # 윈도우와 그리드 생성
+        self._create_window()
+        self._create_grids()
+        
+    def _create_window(self):
+        """코사인 윈도우 생성"""
+        score_size = self.cfg['score_size']
+        hanning = np.hanning(score_size)
+        window = np.outer(hanning, hanning)
+        self.window = window.flatten()
+        
+    def _create_grids(self):
+        """검색 그리드 생성"""
+        sz = self.cfg['score_size']
+        x, y = np.meshgrid(np.arange(sz), np.arange(sz))
+        self.grid_to_search_x = x.flatten() * self.cfg['total_stride']
+        self.grid_to_search_y = y.flatten() * self.cfg['total_stride']
+        
+    def _get_subwindow_tracking(self, im, pos, model_sz, original_sz, avg_chans):
+        """이미지에서 서브윈도우 추출"""
+        c = (original_sz + 1) / 2
+        context_xmin = round(pos[0] - c)
+        context_xmax = context_xmin + original_sz - 1
+        context_ymin = round(pos[1] - c)
+        context_ymax = context_ymin + original_sz - 1
+        
+        left_pad = max(0, -context_xmin)
+        top_pad = max(0, -context_ymin)
+        right_pad = max(0, context_xmax - im.shape[1] + 1)
+        bottom_pad = max(0, context_ymax - im.shape[0] + 1)
+        
+        context_xmin += left_pad
+        context_xmax += left_pad
+        context_ymin += top_pad
+        context_ymax += top_pad
+        
+        if top_pad > 0 or left_pad > 0 or right_pad > 0 or bottom_pad > 0:
+            te_im = cv2.copyMakeBorder(im, top_pad, bottom_pad, left_pad, right_pad,
+                                       cv2.BORDER_CONSTANT, value=avg_chans)
+            im_patch = te_im[context_ymin:context_ymax + 1, context_xmin:context_xmax + 1]
+        else:
+            im_patch = im[context_ymin:context_ymax + 1, context_xmin:context_xmax + 1]
+            
+        im_patch = cv2.resize(im_patch, (model_sz, model_sz))
+        return im_patch
+    
+    def simple_roi_selection(self, frame, point, roi_size=100):
+        """RobustPitchTracker 호환 ROI 선택"""
+        x, y = int(point[0]), int(point[1])
+        
+        half_size = roi_size // 2
+        
+        x1 = max(0, x - half_size)
+        y1 = max(0, y - half_size)
+        x2 = min(frame.shape[1], x + half_size)
+        y2 = min(frame.shape[0], y + half_size)
+        
+        actual_w = x2 - x1
+        actual_h = y2 - y1
+        
+        if actual_w < 60 or actual_h < 60:
+            roi_size = 60
+            half_size = roi_size // 2
+            x1 = max(0, min(x - half_size, frame.shape[1] - roi_size))
+            y1 = max(0, min(y - half_size, frame.shape[0] - roi_size))
+            actual_w = actual_h = roi_size
+        
+        print(f"ROI selected: ({x1}, {y1}, {actual_w}, {actual_h}) at click point ({x}, {y})")
+        return (x1, y1, actual_w, actual_h)
+        
+    def init(self, frame, point):
+        """트래커 초기화 (RobustPitchTracker와 동일한 인터페이스)"""
+        self.bbox = self.simple_roi_selection(frame, point)
+        x, y, w, h = self.bbox
+        
+        # NanoTrack 초기화
+        self.center = [x + w//2, y + h//2]
+        self.target_sz = [w, h]
+        
+        # 이미지 정보 저장
+        self.im_h = frame.shape[0]
+        self.im_w = frame.shape[1]
+        self.channel_ave = cv2.mean(frame)[:3]
+        
+        # 템플릿 특징 추출
+        wc_z = self.target_sz[0] + self.cfg['context_amount'] * sum(self.target_sz)
+        hc_z = self.target_sz[1] + self.cfg['context_amount'] * sum(self.target_sz)
+        s_z = round(math.sqrt(wc_z * hc_z))
+        
+        z_crop = self._get_subwindow_tracking(frame, self.center, 
+                                             self.cfg['exemplar_size'], 
+                                             int(s_z), self.channel_ave)
+        
+        # NCNN으로 특징 추출
+        ex = self.net_backbone.create_extractor()
+        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
+        
+        # BGR to RGB 변환 후 입력
+        z_crop_rgb = cv2.cvtColor(z_crop, cv2.COLOR_BGR2RGB)
+        mat_in = ncnn.Mat.from_pixels(z_crop_rgb, ncnn.Mat.PixelType.PIXEL_RGB, 
+                                      z_crop.shape[1], z_crop.shape[0])
+        
+        ex.input("input", mat_in)
+        _, self.zf = ex.extract("output")
+        
+        self.failed_frames = 0
+        
+        print(f"NanoTrack initialized at {self.center} with bbox {self.bbox}")
+        return True
+        
+    def update(self, frame):
+        """트래킹 업데이트 (RobustPitchTracker와 동일한 인터페이스)"""
+        if self.center is None:
+            return False, self.bbox
+            
+        # 검색 영역 계산
+        wc_z = self.target_sz[0] + self.cfg['context_amount'] * sum(self.target_sz)
+        hc_z = self.target_sz[1] + self.cfg['context_amount'] * sum(self.target_sz)
+        s_z = math.sqrt(wc_z * hc_z)
+        scale_z = self.cfg['exemplar_size'] / s_z
+        
+        d_search = (self.cfg['instance_size'] - self.cfg['exemplar_size']) / 2
+        pad = d_search / scale_z
+        s_x = s_z + 2 * pad
+        
+        # 검색 영역 추출
+        x_crop = self._get_subwindow_tracking(frame, self.center,
+                                             self.cfg['instance_size'],
+                                             int(s_x), self.channel_ave)
+        
+        # 특징 추출 (backbone)
+        ex_backbone = self.net_backbone.create_extractor()
+        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
+        
+        x_crop_rgb = cv2.cvtColor(x_crop, cv2.COLOR_BGR2RGB)
+        mat_in = ncnn.Mat.from_pixels(x_crop_rgb, ncnn.Mat.PixelType.PIXEL_RGB,
+                                      x_crop.shape[1], x_crop.shape[0])
+        
+        ex_backbone.input("input", mat_in)
+        _, xf = ex_backbone.extract("output")
+        
+        # Head 네트워크로 예측
+        ex_head = self.net_head.create_extractor()
+        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
+        
+        ex_head.input("input1", self.zf)
+        ex_head.input("input2", xf)
+        
+        _, cls_score = ex_head.extract("output1")
+        _, bbox_pred = ex_head.extract("output2")
+        
+        # 점수맵 처리
+        score_size = self.cfg['score_size']
+        cls_score_np = np.array(cls_score)[1, :, :].flatten()
+        cls_score_sigmoid = 1 / (1 + np.exp(-cls_score_np))
+        
+        # Bounding box regression
+        bbox_pred_np = np.array(bbox_pred).reshape(4, -1)
+        
+        # 예측 좌표 계산
+        pred_x1 = self.grid_to_search_x - bbox_pred_np[0]
+        pred_y1 = self.grid_to_search_y - bbox_pred_np[1]
+        pred_x2 = self.grid_to_search_x + bbox_pred_np[2]
+        pred_y2 = self.grid_to_search_y + bbox_pred_np[3]
+        
+        # 크기 페널티 계산
+        w = pred_x2 - pred_x1
+        h = pred_y2 - pred_y1
+        
+        # 페널티 적용
+        target_sz_prod = math.sqrt((self.target_sz[0] + sum(self.target_sz) * 0.5) * 
+                                  (self.target_sz[1] + sum(self.target_sz) * 0.5))
+        
+        s_c = np.maximum(w / target_sz_prod, target_sz_prod / w) * \
+              np.maximum(h / target_sz_prod, target_sz_prod / h)
+        r_c = np.maximum((self.target_sz[0] / self.target_sz[1]) / (w / (h + 1e-6)),
+                        (w / (h + 1e-6)) / (self.target_sz[0] / self.target_sz[1]))
+        
+        penalty = np.exp(-(s_c * r_c - 1) * self.cfg['penalty_k'])
+        pscore = penalty * cls_score_sigmoid * (1 - self.cfg['window_influence']) + \
+                self.window * self.cfg['window_influence']
+        
+        # 최대 점수 위치
+        best_idx = np.argmax(pscore)
+        best_score = cls_score_sigmoid[best_idx]
+        
+        # 신뢰도 체크
+        if best_score < self.confidence_threshold:
+            self.failed_frames += 1
+            if self.failed_frames > self.max_failed_frames:
+                print(f"Tracking failed: confidence={best_score:.3f}")
+                return False, self.bbox
+            return True, self.bbox
+        
+        self.failed_frames = 0
+        
+        # 위치 업데이트
+        pred_xs = (pred_x1[best_idx] + pred_x2[best_idx]) / 2
+        pred_ys = (pred_y1[best_idx] + pred_y2[best_idx]) / 2
+        pred_w = pred_x2[best_idx] - pred_x1[best_idx]
+        pred_h = pred_y2[best_idx] - pred_y1[best_idx]
+        
+        diff_xs = (pred_xs - self.cfg['instance_size'] / 2) / scale_z
+        diff_ys = (pred_ys - self.cfg['instance_size'] / 2) / scale_z
+        
+        # Learning rate
+        lr = penalty[best_idx] * best_score * self.cfg['lr']
+        
+        # 중심점 업데이트
+        self.center[0] += diff_xs
+        self.center[1] += diff_ys
+        
+        # 크기 업데이트
+        self.target_sz[0] = self.target_sz[0] * (1 - lr) + pred_w / scale_z * lr
+        self.target_sz[1] = self.target_sz[1] * (1 - lr) + pred_h / scale_z * lr
+        
+        # 경계 체크
+        self.center[0] = np.clip(self.center[0], 0, self.im_w)
+        self.center[1] = np.clip(self.center[1], 0, self.im_h)
+        self.target_sz[0] = np.clip(self.target_sz[0], 10, self.im_w)
+        self.target_sz[1] = np.clip(self.target_sz[1], 10, self.im_h)
+        
+        # 바운딩 박스 계산
+        self.bbox = (
+            int(self.center[0] - self.target_sz[0] / 2),
+            int(self.center[1] - self.target_sz[1] / 2),
+            int(self.target_sz[0]),
+            int(self.target_sz[1])
+        )
+        
+        return True, self.bbox
+
+
 class RobustPitchTracker:
+    """폴백용 템플릿 매칭 트래커 (NCNN이 없을 경우)"""
     
     def __init__(self):
         self.template = None
@@ -201,6 +503,8 @@ class RobustPitchTracker:
         
         return True, self.bbox
 
+
+# 전역 변수들
 current_frame = None
 tracker = None
 tracking = False
@@ -214,6 +518,10 @@ zoom_center = None
 center_x = 0
 center_y = 0
 bbox = None
+
+# NanoTrack 모델 (전역으로 한 번만 로드)
+nanotrack_model = None
+USE_NANOTRACK = NCNN_AVAILABLE  # NCNN 사용 가능 여부에 따라 결정
 
 def camera_init(capture, resolution_index=0):
     if capture.isOpened():
@@ -362,7 +670,7 @@ def udp_receiver():
 
 def process_new_coordinate(frame):
     global latest_point, new_point_received, tracker, tracking, current_frame
-    global center_x, center_y, bbox
+    global center_x, center_y, bbox, USE_NANOTRACK, nanotrack_model
     
     if new_point_received:
         new_point_received = False
@@ -372,7 +680,14 @@ def process_new_coordinate(frame):
         print(f"Processing new coordinate: {point}")
         
         if 0 <= point[0] < frame.shape[1] and 0 <= point[1] < frame.shape[0]:
-            tracker = RobustPitchTracker()
+            # NanoTrack 또는 템플릿 매칭 선택
+            if USE_NANOTRACK and nanotrack_model is not None:
+                tracker = nanotrack_model
+                print("Using NanoTrack for tracking")
+            else:
+                tracker = RobustPitchTracker()
+                print("Using Template Matching for tracking")
+            
             success = tracker.init(frame, point)
             
             if success:
@@ -390,6 +705,25 @@ def process_new_coordinate(frame):
 def main():
     global current_frame, tracker, tracking, target_selected, serial_port
     global zoom_level, zoom_command, zoom_center, center_x, center_y, bbox
+    global nanotrack_model, USE_NANOTRACK
+    
+    # NanoTrack 모델 로드 시도
+    if USE_NANOTRACK:
+        try:
+            print("Loading NanoTrack models...")
+            nanotrack_model = NanoTrack(
+                backbone_param_path="./models/nanotrack_backbone_sim.param",
+                backbone_bin_path="./models/nanotrack_backbone_sim.bin",
+                head_param_path="./models/nanotrack_head_sim.param",
+                head_bin_path="./models/nanotrack_head_sim.bin"
+            )
+            print("NanoTrack models loaded successfully!")
+            USE_NANOTRACK = True
+        except Exception as e:
+            print(f"Warning: Could not load NanoTrack models: {e}")
+            print("Falling back to template matching tracker")
+            USE_NANOTRACK = False
+            nanotrack_model = None
     
     serial_port = setup_serial()
     
@@ -553,7 +887,9 @@ def main():
                 
                 send_data_to_serial(center_x, center_y, tracking)
             
-            status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
+            # 상태 표시
+            tracker_type = "NanoTrack" if USE_NANOTRACK else "Template"
+            status = f"{tracker_type}: X={int(center_x)}, Y={int(center_y)}" if tracking else f"{tracker_type}: OFF"
             cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if tracking else (0, 0, 255), 2)
             
             target_status = "Target Selected" if target_selected else "No Target"
