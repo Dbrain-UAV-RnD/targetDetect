@@ -15,7 +15,7 @@ try:
     NCNN_AVAILABLE = True
     print(f"NCNN version: {ncnn.__version__ if hasattr(ncnn, '__version__') else 'unknown'}")
 except ImportError:
-    print("Warning: NCNN not available, falling back to KCF tracker")
+    print("Warning: NCNN not available, falling back to CSRT tracker")
     NCNN_AVAILABLE = False
 
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
@@ -81,7 +81,7 @@ class NanoTrack:
         self.im_h = 0
         self.im_w = 0
         
-        # 실패 추적용 (RobustPitchTracker 호환성) - confidence_threshold 증가로 안정성 향상
+        # 실패 추적용 - confidence_threshold 증가로 안정성 향상
         self.failed_frames = 0
         self.max_failed_frames = 10
         self.confidence_threshold = 0.25  # 증가시켜 낮은 신뢰도 예측 무시 (tracking 성능 향상)
@@ -335,12 +335,11 @@ class NanoTrack:
         
         return True, self.bbox
 
+
 # 전역 변수들
 current_frame = None
-roi = None
 tracker = None
 tracking = False
-kalman = None
 latest_point = None
 new_point_received = False
 target_selected = False
@@ -352,11 +351,11 @@ center_x = 0
 center_y = 0
 bbox = None
 failed_frames = 0
-max_failed_frames = 10  # 추가: 연속 실패 프레임 제한
+max_failed_frames = 15  # 증가시켜 더 오래 유지
 
 # 트래커 설정
-FIXED_ROI_SIZE = 100  # 고정 ROI 크기 (픽셀) - 필요시 조정 가능
-USE_NANOTRACK = NCNN_AVAILABLE  # NCNN 사용 가능 여부에 따라 결정
+FIXED_ROI_SIZE = 120  # ROI 크기 증가로 타겟 유실 방지
+USE_NANOTRACK = NCNN_AVAILABLE
 
 # NanoTrack 모델 (전역으로 한 번만 로드)
 nanotrack_model = None
@@ -518,19 +517,19 @@ def process_new_coordinate(frame):
         print(f"Processing new coordinate: {point}")
         
         if 0 <= point[0] < frame.shape[1] and 0 <= point[1] < frame.shape[0]:
-            # NanoTrack 또는 KCF 선택
+            # NanoTrack 또는 CSRT 선택 (둘 다 고정 ROI 사용)
             if USE_NANOTRACK and nanotrack_model is not None:
                 tracker = nanotrack_model
                 print(f"Using NanoTrack with fixed ROI size: {FIXED_ROI_SIZE}x{FIXED_ROI_SIZE}")
             else:
-                tracker = cv2.TrackerKCF_create()
-                print("Using KCF Tracker")
+                tracker = cv2.TrackerCSRT_create()  # CSRT로 변경 (드리프트 적음)
+                print(f"Using CSRT Tracker with fixed ROI size: {FIXED_ROI_SIZE}x{FIXED_ROI_SIZE}")
             
-            success = tracker.init(frame, point) if USE_NANOTRACK else tracker.init(frame, tracker.simple_roi_selection(frame, point) if USE_NANOTRACK else (point[0]-50, point[1]-50, 100, 100))
+            success = tracker.init(frame, tracker.simple_roi_selection(frame, point) if USE_NANOTRACK else (point[0]-FIXED_ROI_SIZE//2, point[1]-FIXED_ROI_SIZE//2, FIXED_ROI_SIZE, FIXED_ROI_SIZE))
             
             if success:
                 tracking = True
-                bbox = tracker.bbox if USE_NANOTRACK else tracker.get_bbox()  # Assuming KCF has get_bbox or adjust
+                bbox = tracker.bbox if USE_NANOTRACK else tracker.get_bbox()  # CSRT에 get_bbox 없음, update에서 bbox 반환
                 center_x = bbox[0] + bbox[2] // 2
                 center_y = bbox[1] + bbox[3] // 2
                 failed_frames = 0
@@ -561,7 +560,7 @@ def main():
             USE_NANOTRACK = True
         except Exception as e:
             print(f"Warning: Could not load NanoTrack models: {e}")
-            print("Falling back to KCF tracker")
+            print("Falling back to CSRT tracker")
             USE_NANOTRACK = False
             nanotrack_model = None
     
@@ -656,6 +655,11 @@ def main():
                         failed_frames += 1
                         if failed_frames > max_failed_frames:
                             tracking = False
+                    # 드리프트 감지: bbox 변화가 거의 없으면 (stationary) 위치 고정
+                    if abs(center_x - (bbox[0] + bbox[2] // 2)) < 5 and abs(center_y - (bbox[1] + bbox[3] // 2)) < 5:
+                        # stationary로 판단, 이전 위치 유지
+                        center_x = bbox[0] + bbox[2] // 2
+                        center_y = bbox[1] + bbox[3] // 2
                 except Exception as e:
                     print(f"Tracker error: {e}")
                     tracking = False
@@ -732,7 +736,7 @@ def main():
                 send_data_to_serial(center_x, center_y, tracking)
             
             # 상태 표시
-            tracker_type = "NanoTrack" if USE_NANOTRACK else "KCF"
+            tracker_type = "NanoTrack" if USE_NANOTRACK else "CSRT"
             status = f"{tracker_type}: X={int(center_x)}, Y={int(center_y)}" if tracking else f"{tracker_type}: OFF"
             cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if tracking else (0, 0, 255), 2)
             
