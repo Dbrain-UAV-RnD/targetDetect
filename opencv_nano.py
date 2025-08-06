@@ -359,19 +359,24 @@ def udp_receiver():
                     pass
             
             if is_target_selected:
-                latest_point = (orig_x, orig_y)
-                new_point_received = True
-                target_selected = True
+                # 좌표 유효성 검사
+                if orig_x >= 0 and orig_y >= 0:
+                    latest_point = (orig_x, orig_y)
+                    new_point_received = True
+                    target_selected = True
             elif data[6] == 0x00 and target_selected:
                 target_selected = False
                 tracking = False
             
+            # zoom_center는 타겟 선택 시에만 업데이트
             if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
                 zoom_command = 'zoom_in'
-                zoom_center = (orig_x, orig_y)
+                if orig_x > 0 or orig_y > 0:  # (0,0)이 아닐 때만 zoom center 업데이트
+                    zoom_center = (orig_x, orig_y)
             elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
                 zoom_command = 'zoom_out'
-                zoom_center = (orig_x, orig_y)
+                if orig_x > 0 or orig_y > 0:  # (0,0)이 아닐 때만 zoom center 업데이트
+                    zoom_center = (orig_x, orig_y)
             elif zoom_cmd == 0x00:
                 zoom_command = None
                 
@@ -388,12 +393,22 @@ def process_new_coordinate(frame):
         current_frame = frame.copy()
         
         if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-            roi_size = int(100 / zoom_level)
+            roi_size = max(20, int(100 / zoom_level))  # 최소 크기 보장
             left = max(0, x - roi_size // 2)
             top = max(0, y - roi_size // 2)
             right = min(frame.shape[1], x + roi_size // 2)
             bottom = min(frame.shape[0], y + roi_size // 2)
-            roi = (left, top, right - left, bottom - top)
+            
+            # ROI 크기 검증
+            w = right - left
+            h = bottom - top
+            if w < 10 or h < 10:  # 너무 작은 ROI 방지
+                w = max(w, 20)
+                h = max(h, 20)
+                right = left + w
+                bottom = top + h
+            
+            roi = (left, top, w, h)
             
             # NCNN 트래커 초기화
             success = tracker.init(frame, roi)
@@ -538,8 +553,14 @@ def main():
                 
                 center_x_zoom, center_y_zoom = zoom_center
                 
-                zoom_width = int(w / zoom_level)
-                zoom_height = int(h / zoom_level)
+                # zoom center가 화면 밖에 있으면 중앙으로 설정
+                if center_x_zoom <= 0 or center_x_zoom >= w:
+                    center_x_zoom = w // 2
+                if center_y_zoom <= 0 or center_y_zoom >= h:
+                    center_y_zoom = h // 2
+                
+                zoom_width = max(10, int(w / zoom_level))  # 최소 크기 보장
+                zoom_height = max(10, int(h / zoom_level))  # 최소 크기 보장
                 
                 zoom_x1 = max(0, center_x_zoom - zoom_width // 2)
                 zoom_y1 = max(0, center_y_zoom - zoom_height // 2)
