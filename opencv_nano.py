@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 import socket
 import threading
 import struct
@@ -6,7 +7,6 @@ import time
 import serial
 import gi
 import os
-import numpy as np
 import math
 
 # NCNN import 추가
@@ -14,7 +14,7 @@ try:
     import ncnn
     NCNN_AVAILABLE = True
 except ImportError:
-    print("Warning: NCNN not available, falling back to template matching")
+    print("Warning: NCNN not available, falling back to OpenCV tracker")
     NCNN_AVAILABLE = False
 
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
@@ -44,18 +44,18 @@ class NanoTrack:
             'lr': 0.34
         }
         
-        # NCNN 모델 로드 (스레드 설정을 load_param 전에)
+        # NCNN 모델 로드
         self.net_backbone = ncnn.Net()
-        self.net_backbone.opt.num_threads = 1  # load_param 전에 설정
+        self.net_backbone.opt.num_threads = 1
         self.net_backbone.opt.use_local_pool_allocator = True
-        self.net_backbone.opt.use_vulkan_compute = False  # CPU 사용
+        self.net_backbone.opt.use_vulkan_compute = False
         self.net_backbone.load_param(backbone_param_path)
         self.net_backbone.load_model(backbone_bin_path)
         
         self.net_head = ncnn.Net()
-        self.net_head.opt.num_threads = 1  # load_param 전에 설정
+        self.net_head.opt.num_threads = 1
         self.net_head.opt.use_local_pool_allocator = True
-        self.net_head.opt.use_vulkan_compute = False  # CPU 사용
+        self.net_head.opt.use_vulkan_compute = False
         self.net_head.load_param(head_param_path)
         self.net_head.load_model(head_bin_path)
         
@@ -68,7 +68,7 @@ class NanoTrack:
         self.im_h = 0
         self.im_w = 0
         
-        # 실패 추적용 (RobustPitchTracker 호환성)
+        # 실패 추적용
         self.failed_frames = 0
         self.max_failed_frames = 10
         self.confidence_threshold = 0.2
@@ -119,33 +119,29 @@ class NanoTrack:
         im_patch = cv2.resize(im_patch, (model_sz, model_sz))
         return im_patch
     
-    def simple_roi_selection(self, frame, point, roi_size=100):
-        """RobustPitchTracker 호환 ROI 선택"""
-        x, y = int(point[0]), int(point[1])
-        
-        half_size = roi_size // 2
-        
-        x1 = max(0, x - half_size)
-        y1 = max(0, y - half_size)
-        x2 = min(frame.shape[1], x + half_size)
-        y2 = min(frame.shape[0], y + half_size)
-        
-        actual_w = x2 - x1
-        actual_h = y2 - y1
-        
-        if actual_w < 60 or actual_h < 60:
-            roi_size = 60
+    def init_with_bbox(self, frame, bbox):
+        """OpenCV 트래커와 호환되는 초기화 (bbox 입력)"""
+        x, y, w, h = bbox
+        center_point = (x + w//2, y + h//2)
+        return self.init(frame, center_point, bbox)
+    
+    def init(self, frame, point, bbox=None):
+        """트래커 초기화"""
+        if bbox is None:
+            # 기존 ROI 선택 로직
+            x, y = int(point[0]), int(point[1])
+            roi_size = 100
             half_size = roi_size // 2
-            x1 = max(0, min(x - half_size, frame.shape[1] - roi_size))
-            y1 = max(0, min(y - half_size, frame.shape[0] - roi_size))
-            actual_w = actual_h = roi_size
-        
-        print(f"ROI selected: ({x1}, {y1}, {actual_w}, {actual_h}) at click point ({x}, {y})")
-        return (x1, y1, actual_w, actual_h)
-        
-    def init(self, frame, point):
-        """트래커 초기화 (RobustPitchTracker와 동일한 인터페이스)"""
-        self.bbox = self.simple_roi_selection(frame, point)
+            
+            x1 = max(0, x - half_size)
+            y1 = max(0, y - half_size)
+            x2 = min(frame.shape[1], x + half_size)
+            y2 = min(frame.shape[0], y + half_size)
+            
+            self.bbox = (x1, y1, x2 - x1, y2 - y1)
+        else:
+            self.bbox = bbox
+            
         x, y, w, h = self.bbox
         
         # NanoTrack 초기화
@@ -168,9 +164,7 @@ class NanoTrack:
         
         # NCNN으로 특징 추출
         ex = self.net_backbone.create_extractor()
-        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
         
-        # BGR to RGB 변환 후 입력
         z_crop_rgb = cv2.cvtColor(z_crop, cv2.COLOR_BGR2RGB)
         mat_in = ncnn.Mat.from_pixels(z_crop_rgb, ncnn.Mat.PixelType.PIXEL_RGB, 
                                       z_crop.shape[1], z_crop.shape[0])
@@ -184,7 +178,7 @@ class NanoTrack:
         return True
         
     def update(self, frame):
-        """트래킹 업데이트 (RobustPitchTracker와 동일한 인터페이스)"""
+        """트래킹 업데이트 (OpenCV 트래커와 동일한 인터페이스)"""
         if self.center is None:
             return False, self.bbox
             
@@ -205,7 +199,6 @@ class NanoTrack:
         
         # 특징 추출 (backbone)
         ex_backbone = self.net_backbone.create_extractor()
-        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
         
         x_crop_rgb = cv2.cvtColor(x_crop, cv2.COLOR_BGR2RGB)
         mat_in = ncnn.Mat.from_pixels(x_crop_rgb, ncnn.Mat.PixelType.PIXEL_RGB,
@@ -216,7 +209,6 @@ class NanoTrack:
         
         # Head 네트워크로 예측
         ex_head = self.net_head.create_extractor()
-        # set_light_mode와 set_num_threads 제거 (이미 Net에서 설정됨)
         
         ex_head.input("input1", self.zf)
         ex_head.input("input2", xf)
@@ -306,197 +298,9 @@ class NanoTrack:
         return True, self.bbox
 
 
-class RobustPitchTracker:
-    """폴백용 템플릿 매칭 트래커 (NCNN이 없을 경우)"""
-    
-    def __init__(self):
-        self.template = None
-        self.template_gray = None
-        self.bbox = None
-        self.center = None
-        
-        self.search_scale = 3.0
-        self.confidence_threshold = 0.2
-        self.template_update_rate = 0.05
-        
-        self.max_movement_ratio = 0.5
-        self.velocity_x = 0
-        self.velocity_y = 0
-        self.velocity_decay = 0.8
-        
-        self.failed_frames = 0
-        self.max_failed_frames = 10
-        
-        self.prev_center_y = 0
-        self.pitch_down_threshold = 50
-        
-    def simple_roi_selection(self, frame, point, roi_size=100):
-        x, y = int(point[0]), int(point[1])
-        
-        half_size = roi_size // 2
-        
-        x1 = max(0, x - half_size)
-        y1 = max(0, y - half_size)
-        x2 = min(frame.shape[1], x + half_size)
-        y2 = min(frame.shape[0], y + half_size)
-        
-        actual_w = x2 - x1
-        actual_h = y2 - y1
-        
-        if actual_w < 60 or actual_h < 60:
-            roi_size = 60
-            half_size = roi_size // 2
-            x1 = max(0, min(x - half_size, frame.shape[1] - roi_size))
-            y1 = max(0, min(y - half_size, frame.shape[0] - roi_size))
-            actual_w = actual_h = roi_size
-        
-        print(f"ROI selected: ({x1}, {y1}, {actual_w}, {actual_h}) at click point ({x}, {y})")
-        return (x1, y1, actual_w, actual_h)
-    
-    def init(self, frame, point):
-        self.bbox = self.simple_roi_selection(frame, point)
-        x, y, w, h = self.bbox
-        
-        self.template = frame[y:y+h, x:x+w].copy()
-        self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
-        
-        self.center = [x + w//2, y + h//2]
-        self.prev_center_y = self.center[1]
-        
-        self.velocity_x = 0
-        self.velocity_y = 0
-        self.failed_frames = 0
-        
-        print(f"Tracker initialized at {self.center} with bbox {self.bbox}")
-        return True
-    
-    def update(self, frame):
-        if self.template is None or self.template_gray is None:
-            return False, self.bbox
-        
-        predicted_x = self.center[0] + self.velocity_x
-        predicted_y = self.center[1] + self.velocity_y
-        
-        template_w, template_h = self.template.shape[1], self.template.shape[0]
-        search_w = int(template_w * self.search_scale)
-        search_h = int(template_h * self.search_scale)
-        
-        search_x1 = max(0, int(predicted_x - search_w // 2))
-        search_y1 = max(0, int(predicted_y - search_h // 4))
-        search_x2 = min(frame.shape[1], search_x1 + search_w)
-        search_y2 = min(frame.shape[0], search_y1 + int(search_h * 1.5))
-        
-        search_region = frame[search_y1:search_y2, search_x1:search_x2]
-        
-        if search_region.size == 0:
-            self.failed_frames += 1
-            return self.failed_frames <= self.max_failed_frames, self.bbox
-        
-        search_gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
-        
-        best_score = -1
-        best_loc = None
-        best_scale = 1.0
-        
-        scales = [0.8, 0.9, 1.0, 1.1, 1.2]
-        
-        for scale in scales:
-            scaled_w = int(self.template_gray.shape[1] * scale)
-            scaled_h = int(self.template_gray.shape[0] * scale)
-            
-            if scaled_w > search_gray.shape[1] or scaled_h > search_gray.shape[0]:
-                continue
-                
-            scaled_template = cv2.resize(self.template_gray, (scaled_w, scaled_h))
-            
-            result = cv2.matchTemplate(search_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            
-            if max_val > best_score:
-                best_score = max_val
-                best_loc = max_loc
-                best_scale = scale
-        
-        if best_score < self.confidence_threshold:
-            self.failed_frames += 1
-            
-            if self.failed_frames <= self.max_failed_frames:
-                if self.velocity_y > 0:
-                    self.velocity_y *= 1.2
-                
-                self.center[0] += self.velocity_x
-                self.center[1] += self.velocity_y
-                
-                self.center[0] = max(template_w//2, min(self.center[0], frame.shape[1] - template_w//2))
-                self.center[1] = max(template_h//2, min(self.center[1], frame.shape[0] - template_h//2))
-                
-                self.bbox = (
-                    int(self.center[0] - template_w//2),
-                    int(self.center[1] - template_h//2),
-                    template_w,
-                    template_h
-                )
-                
-                return True, self.bbox
-            else:
-                print(f"Tracking failed: confidence={best_score:.3f}")
-                return False, self.bbox
-        
-        self.failed_frames = 0
-        
-        template_w_scaled = int(self.template_gray.shape[1] * best_scale)
-        template_h_scaled = int(self.template_gray.shape[0] * best_scale)
-        
-        new_center_x = search_x1 + best_loc[0] + template_w_scaled // 2
-        new_center_y = search_y1 + best_loc[1] + template_h_scaled // 2
-        
-        self.velocity_x = new_center_x - self.center[0]
-        self.velocity_y = new_center_y - self.center[1]
-        
-        y_movement = new_center_y - self.prev_center_y
-        if y_movement > self.pitch_down_threshold:
-            print(f"Pitch down detected: {y_movement} pixels")
-            self.confidence_threshold = 0.2
-            self.search_scale = 4.0
-        else:
-            self.confidence_threshold = 0.3
-            self.search_scale = 3.0
-        
-        self.prev_center_y = new_center_y
-        
-        self.center[0] = new_center_x
-        self.center[1] = new_center_y
-        
-        self.velocity_x *= self.velocity_decay
-        self.velocity_y *= self.velocity_decay
-        
-        new_w = int(template_w_scaled)
-        new_h = int(template_h_scaled)
-        
-        self.bbox = (
-            int(self.center[0] - new_w//2),
-            int(self.center[1] - new_h//2),
-            new_w,
-            new_h
-        )
-        
-        if best_score > 0.6:
-            x, y, w, h = self.bbox
-            if 0 <= x < frame.shape[1] - w and 0 <= y < frame.shape[0] - h:
-                new_template = frame[y:y+h, x:x+w]
-                if new_template.size > 0:
-                    self.template = cv2.addWeighted(
-                        self.template, 1 - self.template_update_rate,
-                        cv2.resize(new_template, (self.template.shape[1], self.template.shape[0])),
-                        self.template_update_rate, 0
-                    )
-                    self.template_gray = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
-        
-        return True, self.bbox
-
-
 # 전역 변수들
 current_frame = None
+roi = None
 tracker = None
 tracking = False
 latest_point = None
@@ -508,11 +312,15 @@ zoom_command = None
 zoom_center = None
 center_x = 0
 center_y = 0
-bbox = None
+prev_center_x = 0
+prev_center_y = 0
+velocity_x = 0
+velocity_y = 0
+tracker_fail_count = 0
 
 # NanoTrack 모델 (전역으로 한 번만 로드)
 nanotrack_model = None
-USE_NANOTRACK = NCNN_AVAILABLE  # NCNN 사용 가능 여부에 따라 결정
+USE_NANOTRACK = NCNN_AVAILABLE
 
 def camera_init(capture, resolution_index=0):
     if capture.isOpened():
@@ -639,11 +447,9 @@ def udp_receiver():
                 latest_point = (orig_x, orig_y)
                 new_point_received = True
                 target_selected = True
-                print(f"Target selected at: {latest_point}")
             elif data[6] == 0x00 and target_selected:
                 target_selected = False
                 tracking = False
-                print("Target deselected")
             
             if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
                 zoom_command = 'zoom_in'
@@ -655,48 +461,56 @@ def udp_receiver():
                 zoom_command = None
                 
     except Exception as e:
-        print(f"UDP receiver error: {e}")
+        pass
     finally:
         udp_socket.close()
 
 def process_new_coordinate(frame):
-    global latest_point, new_point_received, tracker, tracking, current_frame
-    global center_x, center_y, bbox, USE_NANOTRACK, nanotrack_model
+    global latest_point, new_point_received, tracker, tracking, roi, current_frame
+    global zoom_level, center_x, center_y, prev_center_x, prev_center_y
+    global velocity_x, velocity_y, tracker_fail_count, USE_NANOTRACK, nanotrack_model
     
     if new_point_received:
         new_point_received = False
-        point = latest_point
+        x, y = latest_point
         current_frame = frame.copy()
         
-        print(f"Processing new coordinate: {point}")
-        
-        if 0 <= point[0] < frame.shape[1] and 0 <= point[1] < frame.shape[0]:
-            # NanoTrack 또는 템플릿 매칭 선택
+        if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
+            roi_size = int(100 / zoom_level)
+            left = max(0, x - roi_size // 2)
+            top = max(0, y - roi_size // 2)
+            right = min(frame.shape[1], x + roi_size // 2)
+            bottom = min(frame.shape[0], y + roi_size // 2)
+            roi = (left, top, right - left, bottom - top)
+            
+            center_x = left + (right - left) / 2
+            center_y = top + (bottom - top) / 2
+            
+            # 초기화 시 속도와 이전 위치 리셋
+            prev_center_x = center_x
+            prev_center_y = center_y
+            velocity_x = 0
+            velocity_y = 0
+            tracker_fail_count = 0
+            
+            # NanoTrack 또는 OpenCV 트래커 선택
             if USE_NANOTRACK and nanotrack_model is not None:
                 tracker = nanotrack_model
+                tracker.init_with_bbox(frame, roi)
                 print("Using NanoTrack for tracking")
             else:
-                tracker = RobustPitchTracker()
-                print("Using Template Matching for tracking")
+                # Fallback to OpenCV tracker
+                tracker = cv2.TrackerCSRT_create()
+                tracker.init(frame, roi)
+                print("Using OpenCV CSRT for tracking")
             
-            success = tracker.init(frame, point)
-            
-            if success:
-                tracking = True
-                bbox = tracker.bbox
-                center_x = bbox[0] + bbox[2] // 2
-                center_y = bbox[1] + bbox[3] // 2
-                print(f"Tracker initialized successfully with bbox: {bbox}")
-            else:
-                tracking = False
-                print("Failed to initialize tracker")
+            tracking = True
         else:
-            print(f"Point {point} is out of bounds")
+            pass
 
 def main():
-    global current_frame, tracker, tracking, target_selected, serial_port
-    global zoom_level, zoom_command, zoom_center, center_x, center_y, bbox
-    global nanotrack_model, USE_NANOTRACK
+    global current_frame, tracker, tracking, roi, target_selected, serial_port
+    global zoom_level, zoom_command, zoom_center, nanotrack_model, USE_NANOTRACK
     
     # NanoTrack 모델 로드 시도
     if USE_NANOTRACK:
@@ -711,7 +525,7 @@ def main():
             print("NanoTrack models loaded successfully!")
         except Exception as e:
             print(f"Failed to load NanoTrack models: {e}")
-            print("Falling back to template matching")
+            print("Falling back to OpenCV CSRT tracker")
             USE_NANOTRACK = False
             nanotrack_model = None
     
@@ -766,16 +580,19 @@ def main():
     pipeline.set_state(Gst.State.PLAYING)
     
     original_frame = None
+    frame_counter = 0
 
     try:
         while True:
             ret, frame = cap.read()
+            frame_counter += 1
             
             if not ret:
                 time.sleep(0.1)
                 continue
             
             original_frame = cv2.resize(frame, (1280, 720))
+            frame = original_frame.copy()
             
             if zoom_command == 'zoom_in' and zoom_level < 3.0:
                 zoom_level += 0.5
@@ -786,25 +603,55 @@ def main():
             
             current_frame = original_frame.copy()
             
-            process_new_coordinate(original_frame)
+            if frame_counter % 3 == 0:
+                process_new_coordinate(original_frame)
             
             if not target_selected:
                 tracking = False
                 center_x = 0
                 center_y = 0
+                prev_center_x = 0 
+                prev_center_y = 0
+                velocity_x = 0
+                velocity_y = 0
 
             if tracking and tracker is not None:
-                try:
-                    success, new_bbox = tracker.update(original_frame)
+                if frame_counter % 3 == 0:
+                    success, bbox = tracker.update(original_frame)
                     if success:
-                        bbox = new_bbox
-                        center_x = bbox[0] + bbox[2] // 2
-                        center_y = bbox[1] + bbox[3] // 2
+                        x, y, w, h = [int(v) for v in bbox]
+                        roi = (x, y, w, h)
+                        
+                        # 이전 중심점 저장
+                        prev_center_x = center_x
+                        prev_center_y = center_y
+                        
+                        # 새로운 중심점 계산
+                        center_x = x + w / 2
+                        center_y = y + h / 2
+                        
+                        # 속도 계산 (3프레임 동안의 이동)
+                        if prev_center_x != 0 and prev_center_y != 0:
+                            velocity_x = (center_x - prev_center_x) / 3
+                            velocity_y = (center_y - prev_center_y) / 3
+                        else:
+                            velocity_x = 0
+                            velocity_y = 0
+                        
+                        tracker_fail_count = 0
                     else:
-                        tracking = False
-                except Exception as e:
-                    print(f"Tracker error: {e}")
-                    tracking = False
+                        # 트래커 실패 시 예측된 위치로 이동
+                        center_x += velocity_x * 3
+                        center_y += velocity_y * 3
+                        tracker_fail_count += 1
+                        
+                        # 5번 이상 실패하면 트래킹 중지
+                        if tracker_fail_count > 5:
+                            tracking = False
+                else:
+                    # 중간 프레임에서는 선형 보간으로 위치 예측
+                    center_x += velocity_x
+                    center_y += velocity_y
             
             display_frame = original_frame.copy()
             
@@ -865,8 +712,8 @@ def main():
                 
             display_to_original_coord = lambda dx, dy: local_display_to_original_coord(dx, dy)
             
-            if tracking and bbox is not None:
-                x, y, w, h = bbox
+            if tracking and tracker is not None and roi is not None:
+                x, y, w, h = roi
                 
                 disp_x, disp_y = original_to_display_coord(x, y)
                 disp_x2, disp_y2 = original_to_display_coord(x + w, y + h)
@@ -875,16 +722,18 @@ def main():
                 
                 cv2.rectangle(display_frame, (disp_x, disp_y), (disp_x + disp_w, disp_y + disp_h), (0, 255, 0), 2)
                 
+                disp_center_x, disp_center_y = original_to_display_coord(int(center_x), int(center_y))
+                cv2.circle(display_frame, (disp_center_x, disp_center_y), 5, (0, 0, 255), -1)
+                
                 send_data_to_serial(center_x, center_y, tracking)
             
-            # 상태 표시
-            tracker_type = "NanoTrack" if USE_NANOTRACK else "Template"
+            # 트래커 타입 표시
+            tracker_type = "NanoTrack" if (USE_NANOTRACK and isinstance(tracker, NanoTrack)) else "CSRT"
             status = f"{tracker_type}: X={int(center_x)}, Y={int(center_y)}" if tracking else f"{tracker_type}: OFF"
             cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if tracking else (0, 0, 255), 2)
             
             target_status = "Target Selected" if target_selected else "No Target"
             cv2.putText(display_frame, target_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if target_selected else (0, 0, 255), 2)
-            
             cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
             buffer = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
