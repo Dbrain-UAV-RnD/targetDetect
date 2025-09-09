@@ -264,7 +264,7 @@ def main():
     
     # Initialize SAM model
     # model = SAM("mobile_sam.pt")
-    model = FastSAM("FastSAM_s.pt")
+    model = FastSAM("FastSAM-s.pt")
     global display_to_original_coord
     
     def display_to_original_coord(disp_x, disp_y, cur_zoom_level=1.0, cur_zoom_x1=0, cur_zoom_y1=0):
