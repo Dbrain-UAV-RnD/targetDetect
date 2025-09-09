@@ -8,7 +8,7 @@ import serial
 import gi
 import os
 import torch
-from ultralytics import SAM
+from ultralytics import SAM, FastSAM
 
 # Set GStreamer plugin path
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
@@ -263,8 +263,8 @@ def main():
     serial_port = setup_serial()
     
     # Initialize SAM model
-    model = SAM("mobile_sam.pt")
-    
+    # model = SAM("mobile_sam.pt")
+    model = FastSAM("FastSAM_s.pt")
     global display_to_original_coord
     
     def display_to_original_coord(disp_x, disp_y, cur_zoom_level=1.0, cur_zoom_x1=0, cur_zoom_y1=0):
