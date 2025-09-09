@@ -298,7 +298,7 @@ def main():
         "h264parse ! "
         "rtph264pay config-interval=1 ! "
         "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
-        "udpsink host=192.168.10.204 port=10010 buffer-size=2097152 sync=true async=false"
+        "udpsink host=192.168.10.201 port=10010 buffer-size=2097152 sync=true async=false"
     )
 
     pipeline = Gst.parse_launch(pipeline_str)
