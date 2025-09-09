@@ -8,7 +8,7 @@ import serial
 import gi
 import os
 import torch
-from ultralytics import SAM, FastSAM
+from ultralytics import YOLO
 
 # Set GStreamer plugin path
 os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
@@ -194,6 +194,21 @@ def udp_receiver():
     finally:
         udp_socket.close()
 
+def get_best_mask_from_point(results, x, y):
+    """Select the mask that contains the given point"""
+    if results[0].masks is None or len(results[0].masks.data) == 0:
+        return None
+    
+    for i, mask in enumerate(results[0].masks.data):
+        mask_np = mask.cpu().numpy()
+        if y < mask_np.shape[0] and x < mask_np.shape[1]:
+            if mask_np[int(y), int(x)] > 0.5:
+                return mask_np.astype(np.uint8) * 255
+    
+    # If no mask contains the point, return the largest mask
+    largest_mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
+    return largest_mask
+
 def resegment_from_tracking_points(frame, points):
     global model
     if len(points) < 3:
@@ -208,20 +223,20 @@ def resegment_from_tracking_points(frame, points):
         center_x = int(np.mean(points[:, 0]))
         center_y = int(np.mean(points[:, 1]))
     
-    results = model.predict(frame, points=[[center_x, center_y]], labels=[1], device=device, verbose=False)
-    if len(results[0].masks.data) > 0:
-        mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
-        
-        feature_params = dict(maxCorners=6,
-                             qualityLevel=0.01,
-                             minDistance=7,
-                             blockSize=3,
-                             mask=mask)
-        
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-        
-        return new_corners, results[0].plot()
+    results = model.predict(frame, device=device, verbose=False)
+    if results[0].masks is not None and len(results[0].masks.data) > 0:
+        mask = get_best_mask_from_point(results, center_x, center_y)
+        if mask is not None:
+            feature_params = dict(maxCorners=6,
+                                 qualityLevel=0.01,
+                                 minDistance=7,
+                                 blockSize=3,
+                                 mask=mask)
+            
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
+            
+            return new_corners, results[0].plot()
     return None, None
 
 def process_new_coordinate(frame):
@@ -235,10 +250,12 @@ def process_new_coordinate(frame):
         
         if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
             device = 0 if torch.cuda.is_available() else "cpu"
-            results = model.predict(current_frame, points=[[x, y]], labels=[1], device=device, verbose=False)
+            results = model.predict(current_frame, device=device, verbose=False)
             segmented_frame = results[0].plot()
             
-            mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
+            mask = get_best_mask_from_point(results, x, y)
+            if mask is None:
+                return
             
             feature_params = dict(maxCorners=6,
                                  qualityLevel=0.01,
@@ -262,9 +279,8 @@ def main():
     
     serial_port = setup_serial()
     
-    # Initialize SAM model
-    model = SAM("mobile_sam.pt")
-    # model = FastSAM("FastSAM-s.pt")
+    # Initialize YOLO segmentation model
+    model = YOLO("yolo11n-seg.pt")
     global display_to_original_coord
     
     def display_to_original_coord(disp_x, disp_y, cur_zoom_level=1.0, cur_zoom_x1=0, cur_zoom_y1=0):
