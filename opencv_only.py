@@ -54,10 +54,10 @@ def camera_init(capture, resolution_index=0):
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
     capture.set(cv2.CAP_PROP_FPS, 25)
 
-    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
-    width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
-    height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    fps = capture.get(cv2.CAP_PROP_FPS)
+    # fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
+    # width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+    # height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    # fps = capture.get(cv2.CAP_PROP_FPS)
 
     return True
 
