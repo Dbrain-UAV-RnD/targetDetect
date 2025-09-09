@@ -243,13 +243,23 @@ def resegment_from_tracking_points(frame, points):
         if results[0].masks is not None and len(results[0].masks.data) > 0:
             mask = get_best_mask_from_point(results, center_x, center_y)
             if mask is not None:
+                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # Ensure mask dimensions match gray_frame
+                if mask.shape[:2] != gray_frame.shape[:2]:
+                    mask = cv2.resize(mask, (gray_frame.shape[1], gray_frame.shape[0]))
+                
+                # Ensure mask is single channel and uint8
+                if len(mask.shape) > 2:
+                    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                mask = mask.astype(np.uint8)
+                
                 feature_params = dict(maxCorners=6,
                                      qualityLevel=0.01,
                                      minDistance=7,
                                      blockSize=3,
                                      mask=mask)
                 
-                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
                 
                 return new_corners, results[0].plot()
@@ -266,46 +276,62 @@ def process_new_coordinate(frame):
     global latest_point, new_point_received, tracker, tracking, roi, current_frame, kalman, zoom_level, failed_frames
     global model, segmented_frame, prev_frame, tracking_points, frame_count
     
+    if not new_point_received:
+        return
+        
     try:
-        if new_point_received:
-            new_point_received = False
-            x, y = latest_point
-            current_frame = frame.copy()
+        new_point_received = False
+        x, y = latest_point
+        current_frame = frame.copy()
+        
+        print(f"Processing new coordinate: ({x}, {y})")
+        
+        if not (0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]):
+            print(f"Point ({x}, {y}) is outside frame bounds {frame.shape[:2][::-1]}")
+            return
             
-            print(f"Processing new coordinate: ({x}, {y})")
+        device = 0 if torch.cuda.is_available() else "cpu"
+        print(f"Running YOLO prediction on device: {device}")
+        results = model.predict(current_frame, device=device, verbose=False)
+        segmented_frame = results[0].plot()
+        
+        mask = get_best_mask_from_point(results, x, y)
+        if mask is None:
+            print("No suitable mask found for the selected point")
+            return
+        
+        gray_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+        
+        # Ensure mask dimensions match gray_frame
+        if mask.shape[:2] != gray_frame.shape[:2]:
+            print(f"Resizing mask from {mask.shape[:2]} to {gray_frame.shape[:2]}")
+            mask = cv2.resize(mask, (gray_frame.shape[1], gray_frame.shape[0]))
+        
+        # Ensure mask is single channel and uint8
+        if len(mask.shape) > 2:
+            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+        mask = mask.astype(np.uint8)
+        
+        print(f"Gray frame shape: {gray_frame.shape}, Mask shape: {mask.shape}")
+        
+        feature_params = dict(maxCorners=6,
+                             qualityLevel=0.01,
+                             minDistance=3,
+                             blockSize=7,
+                             mask=mask)
+        
+        corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
+        
+        if corners is not None:
+            tracking_points = corners
+            prev_frame = gray_frame.copy()
+            tracking = True
+            frame_count = 0
+            failed_frames = 0
+            print(f"Started tracking with {len(corners)} points")
+        else:
+            print("No good features found for tracking")
             
-            if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-                device = 0 if torch.cuda.is_available() else "cpu"
-                print(f"Running YOLO prediction on device: {device}")
-                results = model.predict(current_frame, device=device, verbose=False)
-                segmented_frame = results[0].plot()
-                
-                mask = get_best_mask_from_point(results, x, y)
-                if mask is None:
-                    print("No suitable mask found for the selected point")
-                    return
-                
-                feature_params = dict(maxCorners=6,
-                                     qualityLevel=0.01,
-                                     minDistance=3,
-                                     blockSize=7,
-                                     mask=mask)
-                
-                gray_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-                corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-                
-                if corners is not None:
-                    tracking_points = corners
-                    prev_frame = gray_frame.copy()
-                    tracking = True
-                    frame_count = 0
-                    failed_frames = 0
-                    print(f"Started tracking with {len(corners)} points")
-                else:
-                    print("No good features found for tracking")
-            else:
-                print(f"Point ({x}, {y}) is outside frame bounds {frame.shape[:2][::-1]}")
-                return
     except Exception as e:
         print(f"Error in process_new_coordinate: {e}")
         import traceback
