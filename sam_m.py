@@ -293,21 +293,21 @@ def process_new_coordinate(frame):
         traceback.print_exc()
         return
             
-            feature_params = dict(maxCorners=6,
-                                 qualityLevel=0.01,
-                                 minDistance=3,
-                                 blockSize=7,
-                                 mask=mask)
-            
-            gray_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-            corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-            
-            if corners is not None:
-                tracking_points = corners
-                prev_frame = gray_frame.copy()
-                tracking = True
-                frame_count = 0
-                failed_frames = 0
+    feature_params = dict(maxCorners=6,
+                            qualityLevel=0.01,
+                            minDistance=3,
+                            blockSize=7,
+                            mask=mask)
+    
+    gray_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+    corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
+    
+    if corners is not None:
+        tracking_points = corners
+        prev_frame = gray_frame.copy()
+        tracking = True
+        frame_count = 0
+        failed_frames = 0
 
 def main():
     global current_frame, tracker, tracking, roi, target_selected, kalman, serial_port, zoom_level, zoom_command, zoom_center, failed_frames
