@@ -196,66 +196,102 @@ def udp_receiver():
 
 def get_best_mask_from_point(results, x, y):
     """Select the mask that contains the given point"""
-    if results[0].masks is None or len(results[0].masks.data) == 0:
+    try:
+        if results[0].masks is None or len(results[0].masks.data) == 0:
+            print("No masks found in results")
+            return None
+        
+        print(f"Found {len(results[0].masks.data)} masks, checking point ({x}, {y})")
+        
+        for i, mask in enumerate(results[0].masks.data):
+            mask_np = mask.cpu().numpy()
+            print(f"Mask {i} shape: {mask_np.shape}")
+            if y < mask_np.shape[0] and x < mask_np.shape[1]:
+                if mask_np[int(y), int(x)] > 0.5:
+                    print(f"Point found in mask {i}")
+                    return mask_np.astype(np.uint8) * 255
+        
+        # If no mask contains the point, return the largest mask
+        print("Point not found in any mask, using largest mask")
+        largest_mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
+        return largest_mask
+    except Exception as e:
+        print(f"Error in get_best_mask_from_point: {e}")
+        import traceback
+        traceback.print_exc()
         return None
-    
-    for i, mask in enumerate(results[0].masks.data):
-        mask_np = mask.cpu().numpy()
-        if y < mask_np.shape[0] and x < mask_np.shape[1]:
-            if mask_np[int(y), int(x)] > 0.5:
-                return mask_np.astype(np.uint8) * 255
-    
-    # If no mask contains the point, return the largest mask
-    largest_mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
-    return largest_mask
 
 def resegment_from_tracking_points(frame, points):
     global model
-    if len(points) < 3:
+    try:
+        if len(points) < 3:
+            print("Not enough tracking points for resegmentation")
+            return None, None
+        
+        device = 0 if torch.cuda.is_available() else "cpu"
+        
+        if len(points.shape) == 3:
+            center_x = int(np.mean(points[:, 0, 0]))
+            center_y = int(np.mean(points[:, 0, 1]))
+        else:
+            center_x = int(np.mean(points[:, 0]))
+            center_y = int(np.mean(points[:, 1]))
+        
+        print(f"Resegmenting at center point: ({center_x}, {center_y})")
+        results = model.predict(frame, device=device, verbose=False)
+        
+        if results[0].masks is not None and len(results[0].masks.data) > 0:
+            mask = get_best_mask_from_point(results, center_x, center_y)
+            if mask is not None:
+                feature_params = dict(maxCorners=6,
+                                     qualityLevel=0.01,
+                                     minDistance=7,
+                                     blockSize=3,
+                                     mask=mask)
+                
+                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
+                
+                return new_corners, results[0].plot()
+        
+        print("No suitable masks found for resegmentation")
         return None, None
-    
-    device = 0 if torch.cuda.is_available() else "cpu"
-    
-    if len(points.shape) == 3:
-        center_x = int(np.mean(points[:, 0, 0]))
-        center_y = int(np.mean(points[:, 0, 1]))
-    else:
-        center_x = int(np.mean(points[:, 0]))
-        center_y = int(np.mean(points[:, 1]))
-    
-    results = model.predict(frame, device=device, verbose=False)
-    if results[0].masks is not None and len(results[0].masks.data) > 0:
-        mask = get_best_mask_from_point(results, center_x, center_y)
-        if mask is not None:
-            feature_params = dict(maxCorners=6,
-                                 qualityLevel=0.01,
-                                 minDistance=7,
-                                 blockSize=3,
-                                 mask=mask)
-            
-            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-            
-            return new_corners, results[0].plot()
-    return None, None
+    except Exception as e:
+        print(f"Error in resegment_from_tracking_points: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
 
 def process_new_coordinate(frame):
     global latest_point, new_point_received, tracker, tracking, roi, current_frame, kalman, zoom_level, failed_frames
     global model, segmented_frame, prev_frame, tracking_points, frame_count
     
-    if new_point_received:
-        new_point_received = False
-        x, y = latest_point
-        current_frame = frame.copy()
-        
-        if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-            device = 0 if torch.cuda.is_available() else "cpu"
-            results = model.predict(current_frame, device=device, verbose=False)
-            segmented_frame = results[0].plot()
+    try:
+        if new_point_received:
+            new_point_received = False
+            x, y = latest_point
+            current_frame = frame.copy()
             
-            mask = get_best_mask_from_point(results, x, y)
-            if mask is None:
+            print(f"Processing new coordinate: ({x}, {y})")
+            
+            if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
+                device = 0 if torch.cuda.is_available() else "cpu"
+                print(f"Running YOLO prediction on device: {device}")
+                results = model.predict(current_frame, device=device, verbose=False)
+                segmented_frame = results[0].plot()
+                
+                mask = get_best_mask_from_point(results, x, y)
+                if mask is None:
+                    print("No suitable mask found for the selected point")
+                    return
+            else:
+                print(f"Point ({x}, {y}) is outside frame bounds {frame.shape[:2][::-1]}")
                 return
+    except Exception as e:
+        print(f"Error in process_new_coordinate: {e}")
+        import traceback
+        traceback.print_exc()
+        return
             
             feature_params = dict(maxCorners=6,
                                  qualityLevel=0.01,
@@ -277,10 +313,24 @@ def main():
     global current_frame, tracker, tracking, roi, target_selected, kalman, serial_port, zoom_level, zoom_command, zoom_center, failed_frames
     global model, segmented_frame, prev_frame, tracking_points, frame_count
     
-    serial_port = setup_serial()
-    
-    # Initialize YOLO segmentation model
-    model = YOLO("yolo11n-seg.pt")
+    try:
+        print("Setting up serial connection...")
+        serial_port = setup_serial()
+        print(f"Serial port initialized: {serial_port is not None}")
+        
+        # Initialize YOLO segmentation model
+        print("Loading YOLO11 segmentation model...")
+        model = YOLO("yolo11n-seg.pt")
+        print("Model loaded successfully")
+    except FileNotFoundError as e:
+        print(f"Model file not found: {e}")
+        print("Please ensure yolo11n-seg.pt is in the current directory")
+        return
+    except Exception as e:
+        print(f"Error during initialization: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     global display_to_original_coord
     
     def display_to_original_coord(disp_x, disp_y, cur_zoom_level=1.0, cur_zoom_x1=0, cur_zoom_y1=0):
@@ -298,36 +348,56 @@ def main():
         
         return orig_x, orig_y
     
-    udp_thread = threading.Thread(target=udp_receiver, daemon=True)
-    udp_thread.start()
+    try:
+        print("Starting UDP receiver thread...")
+        udp_thread = threading.Thread(target=udp_receiver, daemon=True)
+        udp_thread.start()
+        print("UDP thread started")
+        
+        print("Initializing camera...")
+        cap = cv2.VideoCapture(0)
+        
+        if not camera_init(cap):
+            print("Camera initialization failed")
+            exit()
+        print("Camera initialized successfully")
+    except Exception as e:
+        print(f"Error during thread/camera setup: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     
-    cap = cv2.VideoCapture(0)
-    
-    if not camera_init(cap):
-        exit()
-    
-    pipeline_str = (
-        "appsrc name=source is-live=true format=3 do-timestamp=true ! "
-        "video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! "
-        "videoconvert ! video/x-raw ! "
-        "x264enc bitrate=6000 tune=zerolatency speed-preset=superfast key-int-max=1 ! "
-        "h264parse ! "
-        "rtph264pay config-interval=1 ! "
-        "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
-        "udpsink host=192.168.10.201 port=10010 buffer-size=2097152 sync=true async=false"
-    )
+    try:
+        print("Setting up GStreamer pipeline...")
+        pipeline_str = (
+            "appsrc name=source is-live=true format=3 do-timestamp=true ! "
+            "video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! "
+            "videoconvert ! video/x-raw ! "
+            "x264enc bitrate=6000 tune=zerolatency speed-preset=superfast key-int-max=1 ! "
+            "h264parse ! "
+            "rtph264pay config-interval=1 ! "
+            "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
+            "udpsink host=192.168.10.201 port=10010 buffer-size=2097152 sync=true async=false"
+        )
 
-    pipeline = Gst.parse_launch(pipeline_str)
-    appsrc = pipeline.get_by_name("source")
-    
-    bus = pipeline.get_bus()
-    bus.add_signal_watch()
-    def on_bus_message(bus, message):
-        if message.type == Gst.MessageType.ERROR:
-            err, debug = message.parse_error()
-    bus.connect("message", on_bus_message)
-    
-    pipeline.set_state(Gst.State.PLAYING)
+        pipeline = Gst.parse_launch(pipeline_str)
+        appsrc = pipeline.get_by_name("source")
+        
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+        def on_bus_message(bus, message):
+            if message.type == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                print(f"GStreamer error: {err}, {debug}")
+        bus.connect("message", on_bus_message)
+        
+        pipeline.set_state(Gst.State.PLAYING)
+        print("GStreamer pipeline started")
+    except Exception as e:
+        print(f"Error setting up GStreamer pipeline: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     
     last_serial_time = 0
     serial_interval = 1.0 / 25.0
@@ -335,11 +405,24 @@ def main():
     original_frame = None
 
     try:
+        print("Starting main processing loop...")
+        frame_counter = 0
         while True:
-            ret, frame = cap.read()
-            
-            if not ret:
-                time.sleep(0.1)
+            try:
+                ret, frame = cap.read()
+                
+                if not ret:
+                    print("Failed to read frame from camera")
+                    time.sleep(0.1)
+                    continue
+                    
+                frame_counter += 1
+                if frame_counter % 100 == 0:
+                    print(f"Processed {frame_counter} frames")
+            except Exception as e:
+                print(f"Error in frame processing loop: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
             
             original_frame = cv2.resize(frame, (1280, 720))
@@ -516,10 +599,12 @@ def main():
                 pass
 
     except KeyboardInterrupt:
-        pass
+        print("\nReceived keyboard interrupt, shutting down...")
     
     except Exception as e:
-        pass
+        print(f"Unexpected error in main loop: {e}")
+        import traceback
+        traceback.print_exc()
     
     finally:
         if serial_port and serial_port.is_open:
