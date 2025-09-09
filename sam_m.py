@@ -208,37 +208,20 @@ def resegment_from_tracking_points(frame, points):
         center_x = int(np.mean(points[:, 0]))
         center_y = int(np.mean(points[:, 1]))
     
-    # FastSAM uses different API
-    results = model.predict(frame, device=device, verbose=False)
+    results = model.predict(frame, points=[[center_x, center_y]], labels=[1], device=device, verbose=False)
     if len(results[0].masks.data) > 0:
-        # Find the mask closest to the center point
-        best_mask = None
-        min_distance = float('inf')
+        mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
         
-        for i, mask_data in enumerate(results[0].masks.data):
-            mask = mask_data.cpu().numpy()
-            mask_coords = np.where(mask > 0.5)
-            if len(mask_coords[0]) > 0:
-                mask_center_y = np.mean(mask_coords[0])
-                mask_center_x = np.mean(mask_coords[1])
-                distance = np.sqrt((mask_center_x - center_x)**2 + (mask_center_y - center_y)**2)
-                if distance < min_distance:
-                    min_distance = distance
-                    best_mask = mask_data
+        feature_params = dict(maxCorners=6,
+                             qualityLevel=0.01,
+                             minDistance=7,
+                             blockSize=3,
+                             mask=mask)
         
-        if best_mask is not None:
-            mask = best_mask.cpu().numpy().astype(np.uint8) * 255
-            
-            feature_params = dict(maxCorners=6,
-                                 qualityLevel=0.01,
-                                 minDistance=7,
-                                 blockSize=3,
-                                 mask=mask)
-            
-            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-            
-            return new_corners, results[0].plot()
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
+        
+        return new_corners, results[0].plot()
     return None, None
 
 def process_new_coordinate(frame):
@@ -252,43 +235,26 @@ def process_new_coordinate(frame):
         
         if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
             device = 0 if torch.cuda.is_available() else "cpu"
-            results = model.predict(current_frame, device=device, verbose=False)
+            results = model.predict(current_frame, points=[[x, y]], labels=[1], device=device, verbose=False)
+            segmented_frame = results[0].plot()
             
-            if len(results[0].masks.data) > 0:
-                # Find the mask closest to the clicked point
-                best_mask = None
-                min_distance = float('inf')
-                
-                for i, mask_data in enumerate(results[0].masks.data):
-                    mask = mask_data.cpu().numpy()
-                    mask_coords = np.where(mask > 0.5)
-                    if len(mask_coords[0]) > 0:
-                        mask_center_y = np.mean(mask_coords[0])
-                        mask_center_x = np.mean(mask_coords[1])
-                        distance = np.sqrt((mask_center_x - x)**2 + (mask_center_y - y)**2)
-                        if distance < min_distance:
-                            min_distance = distance
-                            best_mask = mask_data
-                
-                if best_mask is not None:
-                    segmented_frame = results[0].plot()
-                    mask = best_mask.cpu().numpy().astype(np.uint8) * 255
+            mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
             
-                    feature_params = dict(maxCorners=6,
-                                         qualityLevel=0.01,
-                                         minDistance=3,
-                                         blockSize=7,
-                                         mask=mask)
-                    
-                    gray_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-                    corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-                    
-                    if corners is not None:
-                        tracking_points = corners
-                        prev_frame = gray_frame.copy()
-                        tracking = True
-                        frame_count = 0
-                        failed_frames = 0
+            feature_params = dict(maxCorners=6,
+                                 qualityLevel=0.01,
+                                 minDistance=3,
+                                 blockSize=7,
+                                 mask=mask)
+            
+            gray_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+            corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
+            
+            if corners is not None:
+                tracking_points = corners
+                prev_frame = gray_frame.copy()
+                tracking = True
+                frame_count = 0
+                failed_frames = 0
 
 def main():
     global current_frame, tracker, tracking, roi, target_selected, kalman, serial_port, zoom_level, zoom_command, zoom_center, failed_frames
