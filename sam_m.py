@@ -152,13 +152,16 @@ def send_data_to_serial(px, py, is_tracking, frame_w, frame_h):
 
 
 def gstreamer_camera_pipeline(width, height, fps):
-    # libcamerasrc -> BGR appsink (OpenCV CAP_GSTREAMER)
-    return (
-        f"libcamerasrc ! "
-        f"video/x-raw,width={width},height={height},framerate={fps}/1 ! "
-        f"videoconvert ! video/x-raw,format=BGR ! "
-        f"appsink drop=true max-buffers=2 sync=false"
-    )
+    # Try multiple camera pipeline options for better compatibility
+    pipelines = [
+        # Option 1: Try v4l2src with USB camera
+        f"v4l2src device=/dev/video0 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false",
+        # Option 2: Try v4l2src with different video device  
+        f"v4l2src device=/dev/video1 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false",
+        # Option 3: Fallback libcamerasrc (if available)
+        f"libcamerasrc ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false"
+    ]
+    return pipelines
 
 
 def build_output_pipeline(width, height, fps, host, port, bitrate_kbps):
@@ -369,7 +372,13 @@ def main():
     global serial_port, tracking, prev_frame, tracking_points, frame_count, failed_frames
     global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord, model
 
-    Gst.init(None)
+    # Initialize GStreamer with error handling
+    try:
+        Gst.init(None)
+        print("GStreamer initialized successfully")
+    except Exception as e:
+        print(f"GStreamer initialization failed: {e}")
+        # Continue without GStreamer - we'll use direct OpenCV
 
     # Serial
     serial_port = setup_serial()
@@ -382,29 +391,85 @@ def main():
     udp_thread = threading.Thread(target=udp_receiver, daemon=True)
     udp_thread.start()
 
-    # Camera (GStreamer + libcamerasrc) via OpenCV
-    cap_str = gstreamer_camera_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS)
-    cap = cv2.VideoCapture(cap_str, cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        # Fallback: try V4L2 USB pipeline
-        alt = (
-            f"v4l2src device=/dev/video0 ! video/x-raw,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={TARGET_FPS}/1 ! "
-            "videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false"
-        )
-        cap = cv2.VideoCapture(alt, cv2.CAP_GSTREAMER)
-        if not cap.isOpened():
-            raise RuntimeError("Failed to open camera with GStreamer.")
+    # Camera: Try multiple pipeline options for compatibility
+    cap_pipelines = gstreamer_camera_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS)
+    cap = None
+    
+    # Try each pipeline until one works
+    for i, pipeline in enumerate(cap_pipelines):
+        print(f"Trying camera pipeline {i+1}: {pipeline[:50]}...")
+        try:
+            cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                print(f"Successfully opened camera with pipeline {i+1}")
+                break
+            else:
+                cap.release()
+                cap = None
+        except Exception as e:
+            print(f"Pipeline {i+1} failed: {e}")
+            if cap:
+                cap.release()
+                cap = None
+    
+    # Final fallback: try direct OpenCV camera access
+    if cap is None:
+        print("Trying direct OpenCV camera access...")
+        for device_id in [0, 1, 2]:
+            try:
+                cap = cv2.VideoCapture(device_id)
+                if cap.isOpened():
+                    # Set MJPEG codec first (camera's native format)
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                    
+                    # Try camera's native resolution first
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+                    cap.set(cv2.CAP_PROP_FPS, 30)
+                    
+                    # Test if we can read a frame
+                    ret, test_frame = cap.read()
+                    if ret:
+                        print(f"Successfully opened camera device {device_id} with direct OpenCV (native resolution)")
+                        # Now set desired resolution
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+                        cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
+                        break
+                    else:
+                        cap.release()
+                        cap = None
+                else:
+                    cap.release()
+                    cap = None
+            except Exception as e:
+                print(f"Device {device_id} failed: {e}")
+                if cap:
+                    cap.release()
+                    cap = None
+    
+    if cap is None:
+        raise RuntimeError("Failed to open camera with any method. Check camera connections and permissions.")
 
-    # Output pipeline
-    pipeline_str = build_output_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, SINK_HOST, SINK_PORT, BITRATE_KBPS)
-    pipeline = Gst.parse_launch(pipeline_str)
-    appsrc = pipeline.get_by_name("source")
-    # Set caps on appsrc explicitly (more robust negotiation)
-    caps = Gst.Caps.from_string(
-        f"video/x-raw,format=BGR,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={TARGET_FPS}/1"
-    )
-    appsrc.set_property("caps", caps)
-    pipeline.set_state(Gst.State.PLAYING)
+    # Output pipeline - with error handling
+    pipeline = None
+    appsrc = None
+    try:
+        pipeline_str = build_output_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, SINK_HOST, SINK_PORT, BITRATE_KBPS)
+        pipeline = Gst.parse_launch(pipeline_str)
+        appsrc = pipeline.get_by_name("source")
+        # Set caps on appsrc explicitly (more robust negotiation)
+        caps = Gst.Caps.from_string(
+            f"video/x-raw,format=BGR,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={TARGET_FPS}/1"
+        )
+        appsrc.set_property("caps", caps)
+        pipeline.set_state(Gst.State.PLAYING)
+        print("GStreamer output pipeline initialized successfully")
+    except Exception as e:
+        print(f"GStreamer output pipeline failed: {e}")
+        print("Continuing without video streaming output")
+        pipeline = None
+        appsrc = None
 
     last_serial_time = 0.0
     serial_interval = 1.0 / float(TARGET_FPS)
@@ -541,9 +606,14 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             # Push to GStreamer (appsrc timestamps handled by do-timestamp=true)
-            buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
-            buf.fill(0, display_frame.tobytes())
-            appsrc.emit("push-buffer", buf)
+            if appsrc is not None:
+                try:
+                    buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
+                    buf.fill(0, display_frame.tobytes())
+                    appsrc.emit("push-buffer", buf)
+                except Exception as e:
+                    print(f"GStreamer buffer push failed: {e}")
+                    appsrc = None  # Disable further attempts
 
             # Optional stop signal (cheap check)
             if os.path.exists("stop.signal"):
@@ -553,15 +623,18 @@ def main():
         pass
     finally:
         try:
-            appsrc.emit("end-of-stream")
+            if appsrc is not None:
+                appsrc.emit("end-of-stream")
         except Exception:
             pass
         try:
-            pipeline.set_state(Gst.State.NULL)
+            if pipeline is not None:
+                pipeline.set_state(Gst.State.NULL)
         except Exception:
             pass
         try:
-            cap.release()
+            if cap is not None:
+                cap.release()
         except Exception:
             pass
         try:
