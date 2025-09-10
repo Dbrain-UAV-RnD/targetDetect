@@ -127,12 +127,12 @@ def build_output_pipeline(width, height, fps, host, port, bitrate_kbps):
     return (
         "appsrc name=source is-live=true format=3 do-timestamp=true ! "
         f"video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-        "videoconvert ! video/x-raw ! "
-        f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=1 ! "
-        "h264parse ! "
-        "rtph264pay config-interval=1 ! "
-        "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
-        f"udpsink host={host} port={port} buffer-size=2097152 sync=true async=false"
+        "videoconvert ! video/x-raw,format=I420 ! "
+        f"v4l2h264enc extra-controls=\"encode,h264_profile=1,h264_level=10,video_bitrate={bitrate_kbps*1000}\" ! "
+        "video/x-h264,profile=baseline,level=(string)3.1 ! "
+        "h264parse ! rtph264pay config-interval=1 pt=96 ! "
+        "queue max-size-buffers=50 max-size-time=0 max-size-bytes=0 ! "
+        f"udpsink host={host} port={port} sync=false async=true"
     )
 
 def clamp_roi(cx, cy, w, h, W, H):
