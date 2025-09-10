@@ -1,3 +1,24 @@
+# sam_m_pi5_optimized.py
+#
+# Raspberry Pi 5–tuned version:
+# - Keep OpenCV for core vision (Shi–Tomasi + LK optical flow)
+# - Switch camera I/O to GStreamer + libcamerasrc (Bookworm camera stack)
+# - Headless-friendly (no HighGUI used)
+# - Unify FPS to 25 from end to end
+# - Remove heavy debug drawing by default (toggle DEBUG_DRAW)
+# - Eliminate 1280x720 hard-coding in serial normalization (uses frame shape)
+# - Debounce UDP events and make socket non-blocking
+# - Minimize color conversions and YOLO calls; use retina_masks=False for speed
+# - Rely on appsrc do-timestamp for PTS/DTS (no manual stamping)
+#
+# Install:
+#   pip install --upgrade opencv-python-headless ultralytics pyserial
+#   sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-libcamera \
+#       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+
+import os
+os.environ['GST_PLUGIN_PATH'] = os.environ.get('GST_PLUGIN_PATH', '/usr/lib/aarch64-linux-gnu/gstreamer-1.0')
+
 import cv2
 import numpy as np
 import socket
@@ -6,180 +27,217 @@ import struct
 import time
 import serial
 import gi
-import os
-import torch
-from ultralytics import YOLO
-
-# Set GStreamer plugin path
-os.environ['GST_PLUGIN_PATH'] = '/usr/lib/aarch64-linux-gnu/gstreamer-1.0'
-
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
-Gst.init(None)
+import torch
+from ultralytics import YOLO
 
-current_frame = None
-roi = None
-tracker = None
-tracking = False
-kalman = None
+# -----------------------------
+# Configuration
+# -----------------------------
+FRAME_WIDTH  = 1280
+FRAME_HEIGHT = 720
+TARGET_FPS   = 25
+RESEGMENT_INTERVAL = 8      # N frames between re-segmentation while tracking
+DEBUG_DRAW   = False        # Heavy overlays (YOLO mask plots) off by default
+YOLO_IMGSZ   = 640          # Power-of-32 input (speeds up CPU inference)
+
+# LK / Shi–Tomasi parameters (leaner than defaults to reduce CPU)
+MAX_CORNERS      = 4
+FEATURE_PARAMS = dict(
+    maxCorners=MAX_CORNERS,
+    qualityLevel=0.01,
+    minDistance=5,
+    blockSize=5,
+    mask=None
+)
+LK_PARAMS = dict(
+    winSize=(15, 15),
+    maxLevel=2,
+    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03)
+)
+
+# UDP
+UDP_HOST = '192.168.10.219'
+UDP_PORT = 5001
+
+# RTSP/UDP OUT
+SINK_HOST = '192.168.10.201'
+SINK_PORT = 10010
+BITRATE_KBPS = 6000
+
+# Serial: try common Raspberry Pi ports; fall back to USB
+SERIAL_CANDIDATES = [
+    '/dev/serial0',      # symlink to primary UART on Pi
+    '/dev/ttyAMA0',
+    '/dev/ttyS0',
+    '/dev/ttyUSB0',
+    '/dev/ttyUSB1'
+]
+SERIAL_BAUD = 57600
+
+# Globals (kept small & intentional)
 latest_point = None
 new_point_received = False
 target_selected = False
-serial_port = None
 zoom_level = 1.0
 zoom_command = None
 zoom_center = None
-failed_frames = 0
-max_failed_frames = 10
-model = None
-segmented_frame = None
+tracking = False
 prev_frame = None
 tracking_points = None
 frame_count = 0
-resegment_interval = 5
+failed_frames = 0
+max_failed_frames = 10
 
-lk_params = dict(winSize=(21, 21),
-                maxLevel=3,
-                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+serial_port = None
+model = None
 
-def camera_init(capture, resolution_index=0):
-    if capture.isOpened():
-        pass
-    else:
-        exit()
-        return False
-    
-    resolutions = [
-        (1920, 1080),
-        (3840, 2160),
-        (4208, 3120)
-    ]
+# Will be replaced at runtime with closure aware of zoom window
+def display_to_original_coord(x, y):
+    return int(x), int(y)
 
-    if resolution_index < 0 or resolution_index >= len(resolutions):
-        return False
-        
-    frame_width, frame_height = resolutions[resolution_index]
 
-    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    capture.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
-    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
-    capture.set(cv2.CAP_PROP_FPS, 25)
-
-    # fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
-    # width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
-    # height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    # fps = capture.get(cv2.CAP_PROP_FPS)
-
-    return True
-
+# -----------------------------
+# Utilities
+# -----------------------------
 def setup_serial():
-    try:
-        ser = serial.Serial(
-            port='/dev/ttyTHS1',
-            baudrate=57600,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=0.1
-        )
-        return ser
-    except Exception as e:
-        return None
+    for dev in SERIAL_CANDIDATES:
+        try:
+            ser = serial.Serial(
+                port=dev,
+                baudrate=SERIAL_BAUD,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.1
+            )
+            return ser
+        except Exception:
+            continue
+    return None
 
-def send_data_to_serial(x, y, is_tracking):
+
+def normalize_for_serial(px, py, width, height):
+    # Map image pixel (0..W-1, 0..H-1) to [-1000, +1000] range as in original code
+    xn = int((-1.0 + (px * (2.0 / max(1, width)))) * 1000.0)
+    yn = int(( 1.0 - (py * (2.0 / max(1, height)))) * 1000.0)
+    return xn, yn
+
+
+def send_data_to_serial(px, py, is_tracking, frame_w, frame_h):
     global serial_port
-    
-    x = int((-1 + x * (2/1280)) * 1000)
-    y = int((1 - y * (2/720)) * 1000)
-    
     if serial_port is None or not serial_port.is_open:
         return
-    
+
+    x_norm, y_norm = normalize_for_serial(px, py, frame_w, frame_h)
+
     try:
-        data = struct.pack('<BBhhB', 
-                          0xBB, 0x88,
-                          x, y,
-                          0xFF if is_tracking else 0x00)
+        data = struct.pack('<BBhhB', 0xBB, 0x88, x_norm, y_norm, 0xFF if is_tracking else 0x00)
         checksum = 0
-        for byte in data:
-            checksum ^= byte
+        for b in data:
+            checksum ^= b
         data += bytes([checksum])
         serial_port.write(data)
-    except Exception as e:
+    except Exception:
         try:
             if serial_port and serial_port.is_open:
                 serial_port.close()
-            time.sleep(1)
+            time.sleep(0.25)
+            # attempt reopen
             serial_port = setup_serial()
-        except:
+        except Exception:
             pass
 
+
+def gstreamer_camera_pipeline(width, height, fps):
+    # libcamerasrc -> BGR appsink (OpenCV CAP_GSTREAMER)
+    return (
+        f"libcamerasrc ! "
+        f"video/x-raw,width={width},height={height},framerate={fps}/1 ! "
+        f"videoconvert ! video/x-raw,format=BGR ! "
+        f"appsink drop=true max-buffers=2 sync=false"
+    )
+
+
+def build_output_pipeline(width, height, fps, host, port, bitrate_kbps):
+    # Software x264 on Pi5 (no HW encoder). Keep zerolatency + superfast + key-int=1
+    return (
+        "appsrc name=source is-live=true format=3 do-timestamp=true ! "
+        f"video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
+        "videoconvert ! video/x-raw ! "
+        f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=1 ! "
+        "h264parse ! "
+        "rtph264pay config-interval=1 ! "
+        "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
+        f"udpsink host={host} port={port} buffer-size=2097152 sync=true async=false"
+    )
+
+
+# -----------------------------
+# UDP receiver (non-blocking, de-duplicated)
+# -----------------------------
 def udp_receiver():
     global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center
-    
-    # 이전 값을 저장하기 위한 변수들 추가
-    prev_x = None
-    prev_y = None
+
+    prev_x = prev_y = None
     prev_target_selected = None
     prev_zoom_cmd = None
-    
-    max_retries = 30
-    retry_count = 0
-    
-    while retry_count < max_retries:
+
+    # bind with retries
+    max_retries, retry_delay = 30, 1.0
+    for attempt in range(max_retries):
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            udp_socket.bind(('192.168.10.219', 5001))
+            udp_socket.settimeout(0.5)
+            udp_socket.bind((UDP_HOST, UDP_PORT))
             break
-        except Exception as e:
-            retry_count += 1
-            time.sleep(5)
-    
-    if retry_count == max_retries:
+        except Exception:
+            time.sleep(retry_delay)
+    else:
         return
-    
+
     try:
         while True:
-            data, addr = udp_socket.recvfrom(8)
-            if len(data) < 8:
+            try:
+                data, _ = udp_socket.recvfrom(8)
+            except socket.timeout:
                 continue
-            if data[0] != 0xAA or data[1] != 0x77:
+            except Exception:
+                break
+
+            if len(data) < 8 or data[0] != 0xAA or data[1] != 0x77:
                 continue
-            
+
             x = struct.unpack('<H', data[2:4])[0]
             y = struct.unpack('<H', data[4:6])[0]
-            is_target_selected = data[6] == 0xFF
+            is_target = (data[6] == 0xFF)
             zoom_cmd = data[7]
-            
-            # 값이 이전과 같은지 확인
-            if (x == prev_x and y == prev_y and 
-                is_target_selected == prev_target_selected and 
-                zoom_cmd == prev_zoom_cmd):
-                continue  # 이전과 동일한 값이면 처리 건너뛰기
-            
-            # 현재 값을 이전 값으로 저장
+
+            # dedupe
+            if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
+                continue
+
             prev_x, prev_y = x, y
-            prev_target_selected = is_target_selected
+            prev_target_selected = is_target
             prev_zoom_cmd = zoom_cmd
-            
+
             orig_x, orig_y = x, y
-            
-            if 'display_to_original_coord' in globals():
-                try:
-                    orig_x, orig_y = display_to_original_coord(x, y)
-                except:
-                    pass
-            
-            if is_target_selected:
+            try:
+                orig_x, orig_y = display_to_original_coord(x, y)
+            except Exception:
+                pass
+
+            if is_target:
                 latest_point = (orig_x, orig_y)
                 new_point_received = True
                 target_selected = True
             elif data[6] == 0x00 and target_selected:
                 target_selected = False
                 tracking = False
-            
+
             if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
                 zoom_command = 'zoom_in'
                 zoom_center = (orig_x, orig_y)
@@ -188,458 +246,330 @@ def udp_receiver():
                 zoom_center = (orig_x, orig_y)
             elif zoom_cmd == 0x00:
                 zoom_command = None
-                
-    except Exception as e:
-        pass
-    finally:
-        udp_socket.close()
 
+    finally:
+        try:
+            udp_socket.close()
+        except Exception:
+            pass
+
+
+# -----------------------------
+# YOLO Segmentation helpers
+# -----------------------------
 def get_best_mask_from_point(results, x, y):
-    """Select the mask that contains the given point"""
     try:
-        if results[0].masks is None or len(results[0].masks.data) == 0:
-            print("No masks found in results")
+        masks = getattr(results[0], "masks", None)
+        if masks is None or len(masks.data) == 0:
             return None
-        
-        print(f"Found {len(results[0].masks.data)} masks, checking point ({x}, {y})")
-        
-        for i, mask in enumerate(results[0].masks.data):
-            mask_np = mask.cpu().numpy()
-            print(f"Mask {i} shape: {mask_np.shape}")
-            if y < mask_np.shape[0] and x < mask_np.shape[1]:
-                if mask_np[int(y), int(x)] > 0.5:
-                    print(f"Point found in mask {i}")
-                    return mask_np.astype(np.uint8) * 255
-        
-        # If no mask contains the point, return the largest mask
-        print("Point not found in any mask, using largest mask")
-        largest_mask = results[0].masks.data[0].cpu().numpy().astype(np.uint8) * 255
-        return largest_mask
-    except Exception as e:
-        print(f"Error in get_best_mask_from_point: {e}")
-        import traceback
-        traceback.print_exc()
+
+        # Prefer the mask that contains the point; else the largest by area
+        best = None
+        best_area = -1
+        for mask in masks.data:
+            mask_np = mask.cpu().numpy().astype(np.uint8)
+            h, w = mask_np.shape[:2]
+            if 0 <= int(y) < h and 0 <= int(x) < w and mask_np[int(y), int(x)] > 0:
+                return (mask_np * 255)
+            area = mask_np.sum()
+            if area > best_area:
+                best_area = area
+                best = (mask_np * 255)
+        return best
+    except Exception:
         return None
 
-def resegment_from_tracking_points(frame, points):
+
+def resegment_from_tracking_points(frame_bgr, points, device):
     global model
     try:
-        if len(points) < 3:
-            print("Not enough tracking points for resegmentation")
+        if points is None or len(points) < 3:
             return None, None
-        
-        device = 0 if torch.cuda.is_available() else "cpu"
-        
+
         if len(points.shape) == 3:
-            center_x = int(np.mean(points[:, 0, 0]))
-            center_y = int(np.mean(points[:, 0, 1]))
+            cx = int(np.mean(points[:, 0, 0]))
+            cy = int(np.mean(points[:, 0, 1]))
         else:
-            center_x = int(np.mean(points[:, 0]))
-            center_y = int(np.mean(points[:, 1]))
-        
-        print(f"Resegmenting at center point: ({center_x}, {center_y})")
-        results = model.predict(frame, device=device, verbose=False)
-        
-        if results[0].masks is not None and len(results[0].masks.data) > 0:
-            mask = get_best_mask_from_point(results, center_x, center_y)
-            if mask is not None:
-                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                
-                # Ensure mask dimensions match gray_frame
-                if mask.shape[:2] != gray_frame.shape[:2]:
-                    mask = cv2.resize(mask, (gray_frame.shape[1], gray_frame.shape[0]))
-                
-                # Ensure mask is single channel and uint8
-                if len(mask.shape) > 2:
-                    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-                mask = mask.astype(np.uint8)
-                
-                feature_params = dict(maxCorners=6,
-                                     qualityLevel=0.01,
-                                     minDistance=7,
-                                     blockSize=3,
-                                     mask=mask)
-                
-                new_corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-                
-                return new_corners, results[0].plot()
-        
-        print("No suitable masks found for resegmentation")
-        return None, None
-    except Exception as e:
-        print(f"Error in resegment_from_tracking_points: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, None
+            cx = int(np.mean(points[:, 0]))
+            cy = int(np.mean(points[:, 1]))
 
-def process_new_coordinate(frame):
-    global latest_point, new_point_received, tracker, tracking, roi, current_frame, kalman, zoom_level, failed_frames
-    global model, segmented_frame, prev_frame, tracking_points, frame_count
-    
-    if not new_point_received:
-        return
-        
-    try:
-        new_point_received = False
-        x, y = latest_point
-        current_frame = frame.copy()
-        
-        print(f"Processing new coordinate: ({x}, {y})")
-        
-        if not (0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]):
-            print(f"Point ({x}, {y}) is outside frame bounds {frame.shape[:2][::-1]}")
-            return
-            
-        device = 0 if torch.cuda.is_available() else "cpu"
-        print(f"Running YOLO prediction on device: {device}")
-        results = model.predict(current_frame, device=device, verbose=False)
-        segmented_frame = results[0].plot()
-        
-        mask = get_best_mask_from_point(results, x, y)
-        if mask is None:
-            print("No suitable mask found for the selected point")
-            return
-        
-        gray_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-        
-        # Ensure mask dimensions match gray_frame
-        if mask.shape[:2] != gray_frame.shape[:2]:
-            print(f"Resizing mask from {mask.shape[:2]} to {gray_frame.shape[:2]}")
-            mask = cv2.resize(mask, (gray_frame.shape[1], gray_frame.shape[0]))
-        
-        # Ensure mask is single channel and uint8
-        if len(mask.shape) > 2:
-            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-        mask = mask.astype(np.uint8)
-        
-        print(f"Gray frame shape: {gray_frame.shape}, Mask shape: {mask.shape}")
-        
-        feature_params = dict(maxCorners=6,
-                             qualityLevel=0.01,
-                             minDistance=3,
-                             blockSize=7,
-                             mask=mask)
-        
-        corners = cv2.goodFeaturesToTrack(gray_frame, **feature_params)
-        
-        if corners is not None:
-            tracking_points = corners
-            prev_frame = gray_frame.copy()
-            tracking = True
-            frame_count = 0
-            failed_frames = 0
-            print(f"Started tracking with {len(corners)} points")
-        else:
-            print("No good features found for tracking")
-            
-    except Exception as e:
-        print(f"Error in process_new_coordinate: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-
-def main():
-    global current_frame, tracker, tracking, roi, target_selected, kalman, serial_port, zoom_level, zoom_command, zoom_center, failed_frames
-    global model, segmented_frame, prev_frame, tracking_points, frame_count
-    
-    try:
-        print("Setting up serial connection...")
-        serial_port = setup_serial()
-        print(f"Serial port initialized: {serial_port is not None}")
-        
-        # Initialize YOLO segmentation model
-        print("Loading YOLO11 segmentation model...")
-        model = YOLO("yolo11n-seg.pt")
-        print("Model loaded successfully")
-    except FileNotFoundError as e:
-        print(f"Model file not found: {e}")
-        print("Please ensure yolo11n-seg.pt is in the current directory")
-        return
-    except Exception as e:
-        print(f"Error during initialization: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-    global display_to_original_coord
-    
-    def display_to_original_coord(disp_x, disp_y, cur_zoom_level=1.0, cur_zoom_x1=0, cur_zoom_y1=0):
-        if cur_zoom_level <= 1.0:
-            return int(disp_x), int(disp_y)
-        
-        rel_x = disp_x / cur_zoom_level
-        rel_y = disp_y / cur_zoom_level
-        
-        orig_x = int(rel_x + cur_zoom_x1)
-        orig_y = int(rel_y + cur_zoom_y1)
-        
-        orig_x = max(0, min(orig_x, 1280-1))
-        orig_y = max(0, min(orig_y, 720-1))
-        
-        return orig_x, orig_y
-    
-    try:
-        print("Starting UDP receiver thread...")
-        udp_thread = threading.Thread(target=udp_receiver, daemon=True)
-        udp_thread.start()
-        print("UDP thread started")
-        
-        print("Initializing camera...")
-        cap = cv2.VideoCapture(0)
-        
-        if not camera_init(cap):
-            print("Camera initialization failed")
-            exit()
-        print("Camera initialized successfully")
-    except Exception as e:
-        print(f"Error during thread/camera setup: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-    
-    try:
-        print("Setting up GStreamer pipeline...")
-        pipeline_str = (
-            "appsrc name=source is-live=true format=3 do-timestamp=true ! "
-            "video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! "
-            "videoconvert ! video/x-raw ! "
-            "x264enc bitrate=6000 tune=zerolatency speed-preset=superfast key-int-max=1 ! "
-            "h264parse ! "
-            "rtph264pay config-interval=1 ! "
-            "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
-            "udpsink host=192.168.10.201 port=10010 buffer-size=2097152 sync=true async=false"
+        results = model.predict(
+            frame_bgr,
+            device=device,
+            verbose=False,
+            retina_masks=False,
+            imgsz=YOLO_IMGSZ
         )
 
-        pipeline = Gst.parse_launch(pipeline_str)
-        appsrc = pipeline.get_by_name("source")
-        
-        bus = pipeline.get_bus()
-        bus.add_signal_watch()
-        def on_bus_message(bus, message):
-            if message.type == Gst.MessageType.ERROR:
-                err, debug = message.parse_error()
-                print(f"GStreamer error: {err}, {debug}")
-        bus.connect("message", on_bus_message)
-        
-        pipeline.set_state(Gst.State.PLAYING)
-        print("GStreamer pipeline started")
-    except Exception as e:
-        print(f"Error setting up GStreamer pipeline: {e}")
-        import traceback
-        traceback.print_exc()
+        mask = get_best_mask_from_point(results, cx, cy)
+        if mask is None:
+            return None, None
+
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+        if mask.shape[:2] != gray.shape[:2]:
+            mask = cv2.resize(mask, (gray.shape[1], gray.shape[0]))
+
+        params = FEATURE_PARAMS.copy()
+        params['mask'] = mask
+        new_corners = cv2.goodFeaturesToTrack(gray, **params)
+
+        overlay = results[0].plot() if DEBUG_DRAW else None
+        return new_corners, overlay
+    except Exception:
+        return None, None
+
+
+def process_new_coordinate(frame_bgr, device):
+    global latest_point, new_point_received, tracking, prev_frame, tracking_points, frame_count, failed_frames
+
+    if not new_point_received:
         return
-    
-    last_serial_time = 0
-    serial_interval = 1.0 / 25.0
-    
-    original_frame = None
+
+    new_point_received = False
+    x, y = latest_point
+
+    if not (0 <= x < frame_bgr.shape[1] and 0 <= y < frame_bgr.shape[0]):
+        return
+
+    # One-shot YOLO segmentation on demand
+    results = model.predict(
+        frame_bgr,
+        device=device,
+        verbose=False,
+        retina_masks=False,
+        imgsz=YOLO_IMGSZ
+    )
+
+    mask = get_best_mask_from_point(results, x, y)
+    if mask is None:
+        return
+
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+    if mask.shape[:2] != gray.shape[:2]:
+        mask = cv2.resize(mask, (gray.shape[1], gray.shape[0]))
+
+    params = FEATURE_PARAMS.copy()
+    params['mask'] = mask
+    corners = cv2.goodFeaturesToTrack(gray, **params)
+
+    if corners is not None:
+        tracking_points = corners
+        prev_frame = gray.copy()
+        tracking = True
+        frame_count = 0
+        failed_frames = 0
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    global serial_port, tracking, prev_frame, tracking_points, frame_count, failed_frames
+    global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord, model
+
+    Gst.init(None)
+
+    # Serial
+    serial_port = setup_serial()
+
+    # YOLO model on CPU (Pi 5); half-precision is not used on CPU.
+    model = YOLO("yolo11n-seg.pt")
+    device = "cpu"
+
+    # UDP receiver
+    udp_thread = threading.Thread(target=udp_receiver, daemon=True)
+    udp_thread.start()
+
+    # Camera (GStreamer + libcamerasrc) via OpenCV
+    cap_str = gstreamer_camera_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS)
+    cap = cv2.VideoCapture(cap_str, cv2.CAP_GSTREAMER)
+    if not cap.isOpened():
+        # Fallback: try V4L2 USB pipeline
+        alt = (
+            f"v4l2src device=/dev/video0 ! video/x-raw,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={TARGET_FPS}/1 ! "
+            "videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false"
+        )
+        cap = cv2.VideoCapture(alt, cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
+            raise RuntimeError("Failed to open camera with GStreamer.")
+
+    # Output pipeline
+    pipeline_str = build_output_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, SINK_HOST, SINK_PORT, BITRATE_KBPS)
+    pipeline = Gst.parse_launch(pipeline_str)
+    appsrc = pipeline.get_by_name("source")
+    # Set caps on appsrc explicitly (more robust negotiation)
+    caps = Gst.Caps.from_string(
+        f"video/x-raw,format=BGR,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={TARGET_FPS}/1"
+    )
+    appsrc.set_property("caps", caps)
+    pipeline.set_state(Gst.State.PLAYING)
+
+    last_serial_time = 0.0
+    serial_interval = 1.0 / float(TARGET_FPS)
+
+    frame_counter = 0
 
     try:
-        print("Starting main processing loop...")
-        frame_counter = 0
         while True:
-            try:
-                ret, frame = cap.read()
-                
-                if not ret:
-                    print("Failed to read frame from camera")
-                    time.sleep(0.1)
-                    continue
-                    
-                frame_counter += 1
-                if frame_counter % 100 == 0:
-                    print(f"Processed {frame_counter} frames")
-            except Exception as e:
-                print(f"Error in frame processing loop: {e}")
-                import traceback
-                traceback.print_exc()
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.005)
                 continue
-            
-            original_frame = cv2.resize(frame, (1280, 720))
-            frame = original_frame.copy()
-            
+
+            frame_counter += 1
+            if frame_counter % (TARGET_FPS * 4) == 0:
+                # lightweight periodic log
+                print(f"[{time.strftime('%H:%M:%S')}] frames: {frame_counter} tracking={tracking}")
+
+            # Zoom step (event-driven)
             if zoom_command == 'zoom_in' and zoom_level < 3.0:
                 zoom_level += 0.5
                 zoom_command = None
             elif zoom_command == 'zoom_out' and zoom_level > 1.0:
                 zoom_level -= 0.5
                 zoom_command = None
-            
-            current_frame = original_frame.copy()
-            
-            process_new_coordinate(original_frame)
-            
-            center_x, center_y = 0, 0
-            pred_x, pred_y = 0, 0
-            
+
+            # Process new click/selection (runs YOLO once)
+            process_new_coordinate(frame, device)
+
+            # Tracking step (LK optical flow)
+            center_x = center_y = 0
             if not target_selected:
                 tracking = False
                 failed_frames = 0
 
             if tracking and tracking_points is not None and prev_frame is not None:
-                gray_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2GRAY)
-                
-                next_pts, status, error = cv2.calcOpticalFlowPyrLK(prev_frame, gray_frame, tracking_points, None, **lk_params)
-                
-                good_new = next_pts[status == 1]
-                good_old = tracking_points[status == 1]
-                
-                if len(good_new) > 2:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                next_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_frame, gray, tracking_points, None, **LK_PARAMS)
+
+                good_new = next_pts[status == 1] if next_pts is not None else np.array([])
+                # good_old = tracking_points[status == 1]  # not used for now
+
+                if good_new is not None and len(good_new) > 2:
                     frame_count += 1
-                    
-                    if frame_count % resegment_interval == 0:
-                        new_corners, new_segmented = resegment_from_tracking_points(original_frame, good_new)
-                        if new_corners is not None:
-                            tracking_points = new_corners
-                            segmented_frame = new_segmented
-                        else:
-                            tracking_points = good_new.reshape(-1, 1, 2)
+
+                    if frame_count % RESEGMENT_INTERVAL == 0:
+                        new_corners, _ = resegment_from_tracking_points(frame, good_new, device)
+                        tracking_points = new_corners if new_corners is not None else good_new.reshape(-1, 1, 2)
                     else:
                         tracking_points = good_new.reshape(-1, 1, 2)
-                    
-                    # Calculate center from tracking points
+
                     if len(tracking_points.shape) == 3:
                         center_x = int(np.mean(tracking_points[:, 0, 0]))
                         center_y = int(np.mean(tracking_points[:, 0, 1]))
                     else:
                         center_x = int(np.mean(tracking_points[:, 0]))
                         center_y = int(np.mean(tracking_points[:, 1]))
-                    
-                    prev_frame = gray_frame.copy()
+
+                    prev_frame = gray.copy()
                     failed_frames = 0
                 else:
                     tracking = False
                     tracking_points = None
                     failed_frames += 1
-                
-                # 연속 실패 시 트래킹 중지
+
                 if failed_frames > max_failed_frames:
                     tracking = False
                     failed_frames = 0
-            
-            display_frame = original_frame.copy()
-            
-            zoom_x1, zoom_y1 = 0, 0
+
+            # Zoomed display mapping (for overlays + back-mapping)
+            display_frame = frame
+            zoom_x1 = zoom_y1 = 0
             zoom_applied = False
-            
+
             if zoom_level > 1.0 and zoom_center is not None:
                 h, w = display_frame.shape[:2]
-                
-                center_x_zoom, center_y_zoom = zoom_center
-                
-                zoom_width = int(w / zoom_level)
-                zoom_height = int(h / zoom_level)
-                
-                zoom_x1 = max(0, center_x_zoom - zoom_width // 2)
-                zoom_y1 = max(0, center_y_zoom - zoom_height // 2)
-                
-                if zoom_x1 + zoom_width > w:
-                    zoom_x1 = w - zoom_width
-                if zoom_y1 + zoom_height > h:
-                    zoom_y1 = h - zoom_height
-                
-                roi_zoom = display_frame[zoom_y1:zoom_y1+zoom_height, zoom_x1:zoom_x1+zoom_width]
-                display_frame = cv2.resize(roi_zoom, (w, h))
-                zoom_applied = True
-            
-            def original_to_display_coord(orig_x, orig_y):
-                if not zoom_applied or zoom_level <= 1.0:
-                    return int(orig_x), int(orig_y)
-                
-                rel_x = orig_x - zoom_x1
-                rel_y = orig_y - zoom_y1
-                
-                disp_x = int(rel_x * zoom_level)
-                disp_y = int(rel_y * zoom_level)
-                
-                h, w = display_frame.shape[:2]
-                disp_x = max(0, min(disp_x, w-1))
-                disp_y = max(0, min(disp_y, h-1))
-                
-                return disp_x, disp_y
-                
-            def local_display_to_original_coord(disp_x, disp_y):
-                if not zoom_applied or zoom_level <= 1.0:
-                    return int(disp_x), int(disp_y)
-                
-                rel_x = disp_x / zoom_level
-                rel_y = disp_y / zoom_level
-                
-                orig_x = int(rel_x + zoom_x1)
-                orig_y = int(rel_y + zoom_y1)
-                
-                h, w = original_frame.shape[:2]
-                orig_x = max(0, min(orig_x, w-1))
-                orig_y = max(0, min(orig_y, h-1))
-                
-                return orig_x, orig_y
-                
-            display_to_original_coord = lambda dx, dy: local_display_to_original_coord(dx, dy)
-            
-            if tracking and tracking_points is not None:
-                # Draw tracking points
-                for point in tracking_points:
-                    if len(point.shape) == 2:
-                        x, y = point.ravel().astype(int)
-                    else:
-                        x, y = point[0], point[1]
-                    disp_x, disp_y = original_to_display_coord(x, y)
-                    cv2.circle(display_frame, (disp_x, disp_y), 3, (0, 255, 0), -1)
-                
-                # Draw center point
-                disp_center_x, disp_center_y = original_to_display_coord(int(center_x), int(center_y))
-                cv2.circle(display_frame, (disp_center_x, disp_center_y), 5, (0, 0, 255), -1)
-                
-                send_data_to_serial(center_x, center_y, tracking)
-            
-            status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
-            cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if tracking else (0, 0, 255), 2)
-            target_status = "Target Selected" if target_selected else "No Target"
-            cv2.putText(display_frame, target_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if target_selected else (0, 0, 255), 2)
-            cv2.putText(display_frame, f"Zoom: {zoom_level}x", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # if zoom_center is not None:
-            #     if 'original_to_display_coord' in locals():
-            #         disp_zoom_x, disp_zoom_y = original_to_display_coord(*zoom_center)
-            #         cv2.circle(display_frame, (disp_zoom_x, disp_zoom_y), 8, (255, 255, 0), -1)
-            #         cv2.putText(display_frame, f"Zoom Center: {zoom_center} -> ({disp_zoom_x}, {disp_zoom_y})", 
-            #                     (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            
-            if zoom_applied and tracking:
-                disp_x, disp_y = original_to_display_coord(int(center_x), int(center_y))
-                
-                # test_x, test_y = local_display_to_original_coord(disp_x, disp_y)
-                
-                debug_info = f"Orig: ({int(center_x)}, {int(center_y)}) -> Disp: ({disp_x}, {disp_y})"
-                cv2.putText(display_frame, debug_info, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                
-                # conversion_test = f"Back conversion test: ({disp_x}, {disp_y}) -> ({test_x}, {test_y})"
-                # cv2.putText(display_frame, conversion_test, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-            
-            buffer = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
-            buffer.fill(0, display_frame.tobytes())
-            buffer.pts = Gst.CLOCK_TIME_NONE
-            buffer.dts = Gst.CLOCK_TIME_NONE
-            appsrc.emit("push-buffer", buffer)
+                cx, cy = zoom_center
+                zw = int(w / zoom_level)
+                zh = int(h / zoom_level)
 
-            try:
-                if open("stop.signal", "r").close() or False:
-                    break
-            except:
-                pass
+                zoom_x1 = max(0, min(w - zw, int(cx - zw // 2)))
+                zoom_y1 = max(0, min(h - zh, int(cy - zh // 2)))
+
+                roi = display_frame[zoom_y1:zoom_y1 + zh, zoom_x1:zoom_x1 + zw]
+                display_frame = cv2.resize(roi, (w, h))
+                zoom_applied = True
+
+            def original_to_display_coord(ox, oy):
+                if not zoom_applied or zoom_level <= 1.0:
+                    return int(ox), int(oy)
+                rel_x = ox - zoom_x1
+                rel_y = oy - zoom_y1
+                return int(rel_x * zoom_level), int(rel_y * zoom_level)
+
+            def local_display_to_original_coord(dx, dy):
+                if not zoom_applied or zoom_level <= 1.0:
+                    return int(dx), int(dy)
+                rel_x = dx / zoom_level
+                rel_y = dy / zoom_level
+                ox = int(rel_x + zoom_x1)
+                oy = int(rel_y + zoom_y1)
+                h, w = frame.shape[:2]
+                return max(0, min(ox, w - 1)), max(0, min(oy, h - 1))
+
+            display_to_original_coord = lambda dx, dy: local_display_to_original_coord(dx, dy)
+
+            # Lightweight overlays (no YOLO plots unless DEBUG_DRAW=True)
+            if tracking and tracking_points is not None:
+                for pt in tracking_points:
+                    # pt is shape (1,2) or (2,)
+                    arr = pt.ravel().astype(int)
+                    x, y = int(arr[0]), int(arr[1])
+                    dx, dy = original_to_display_coord(x, y)
+                    cv2.circle(display_frame, (dx, dy), 3, (0, 255, 0), -1)
+
+                cx_d, cy_d = original_to_display_coord(center_x, center_y)
+                cv2.circle(display_frame, (cx_d, cy_d), 5, (0, 0, 255), -1)
+
+                # Rate-limited serial
+                now = time.time()
+                if now - last_serial_time >= serial_interval:
+                    fh, fw = frame.shape[:2]
+                    send_data_to_serial(center_x, center_y, tracking, fw, fh)
+                    last_serial_time = now
+
+            status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
+            cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 0) if tracking else (0, 0, 255), 2)
+            target_status = "Target Selected" if target_selected else "No Target"
+            cv2.putText(display_frame, target_status, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 0) if target_selected else (0, 0, 255), 2)
+            cv2.putText(display_frame, f"Zoom: {zoom_level:.1f}x", (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            # Push to GStreamer (appsrc timestamps handled by do-timestamp=true)
+            buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
+            buf.fill(0, display_frame.tobytes())
+            appsrc.emit("push-buffer", buf)
+
+            # Optional stop signal (cheap check)
+            if os.path.exists("stop.signal"):
+                break
 
     except KeyboardInterrupt:
-        print("\nReceived keyboard interrupt, shutting down...")
-    
-    except Exception as e:
-        print(f"Unexpected error in main loop: {e}")
-        import traceback
-        traceback.print_exc()
-    
+        pass
     finally:
-        if serial_port and serial_port.is_open:
-            serial_port.close()
-        pipeline.set_state(Gst.State.NULL)
-        cap.release()
+        try:
+            appsrc.emit("end-of-stream")
+        except Exception:
+            pass
+        try:
+            pipeline.set_state(Gst.State.NULL)
+        except Exception:
+            pass
+        try:
+            cap.release()
+        except Exception:
+            pass
+        try:
+            if serial_port and serial_port.is_open:
+                serial_port.close()
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     main()
