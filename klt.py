@@ -21,12 +21,12 @@ ROI_SIZE = 100
 MIN_POINTS = 3
 MAX_CORNERS = 30
 QUALITY_LEVEL = 0.01
-MIN_DISTANCE = 7
+MIN_DISTANCE = 5
 GFTT_BLOCKSIZE = 7
 
 # LK 계산용 프레임 다운스케일 비율 (0.5 = 50% 크기, 1.0 = 원본 크기)
 # 더 빠른 성능을 원하면 0.3~0.5 사용
-LK_FRAME_SCALE = 0.5
+LK_FRAME_SCALE = 0.25
 
 LK_PARAMS = dict(
     winSize=(21, 21),
