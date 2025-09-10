@@ -24,9 +24,9 @@ QUALITY_LEVEL = 0.01
 MIN_DISTANCE = 7
 GFTT_BLOCKSIZE = 7
 
-# ROI 패치 다운스케일 비율 (0.5 = 50% 크기, 1.0 = 원본 크기)
-# 더 빠른 성능을 원하면 0.5~0.7 사용
-ROI_PATCH_SCALE = 0.3
+# LK 계산용 프레임 다운스케일 비율 (0.5 = 50% 크기, 1.0 = 원본 크기)
+# 더 빠른 성능을 원하면 0.3~0.5 사용
+LK_FRAME_SCALE = 0.5
 
 LK_PARAMS = dict(
     winSize=(21, 21),
@@ -35,7 +35,7 @@ LK_PARAMS = dict(
 )
 
 ROI_MOVE_ALPHA = 1
-MIN_POINTS_FOR_MOVE = 1
+MIN_POINTS_FOR_MOVE = 0
 
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
@@ -387,93 +387,63 @@ def main():
             if not target_selected:
                 tracking = False
 
-            if tracking and tracking_points is not None and len(tracking_points) > 0 and prev_frame is not None and roi_rect is not None:
+            if tracking and tracking_points is not None and len(tracking_points) > 0 and prev_frame is not None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 H, W = gray.shape[:2]
                 
-                # ========== 최적화: ROI 패치에서만 LK 계산 ==========
-                x, y, w, h = roi_rect
-                
-                # ROI 영역이 유효한지 확인
-                x = max(0, min(x, W - 1))
-                y = max(0, min(y, H - 1))
-                w = min(w, W - x)
-                h = min(h, H - y)
-                
-                if w > 10 and h > 10:  # 최소 크기 확인
-                    # 1) ROI 패치 추출
-                    prev_patch = prev_frame[y:y+h, x:x+w]
-                    curr_patch = gray[y:y+h, x:x+w]
+                # ========== 최적화: 프레임 다운스케일 후 LK 계산 ==========
+                if LK_FRAME_SCALE < 1.0:
+                    # 1) 프레임 다운스케일
+                    prev_scaled = cv2.resize(prev_frame, None, fx=LK_FRAME_SCALE, fy=LK_FRAME_SCALE, 
+                                            interpolation=cv2.INTER_AREA)
+                    gray_scaled = cv2.resize(gray, None, fx=LK_FRAME_SCALE, fy=LK_FRAME_SCALE, 
+                                            interpolation=cv2.INTER_AREA)
                     
-                    # 2) 포인트를 ROI 로컬 좌표계로 변환
-                    pts_global = tracking_points.reshape(-1, 2)
-                    pts_local = pts_global - np.array([x, y], dtype=np.float32)
+                    # 2) 포인트 좌표 스케일 조정
+                    tracking_points_scaled = tracking_points * LK_FRAME_SCALE
                     
-                    # ROI 내부에 있는 포인트만 필터링
-                    valid_mask = (pts_local[:, 0] >= 0) & (pts_local[:, 0] < w) & \
-                                 (pts_local[:, 1] >= 0) & (pts_local[:, 1] < h)
-                    pts_local_valid = pts_local[valid_mask]
+                    # 3) 다운스케일된 프레임에서 LK 계산
+                    p1, st, err = cv2.calcOpticalFlowPyrLK(
+                        prev_scaled, gray_scaled, tracking_points_scaled, None, **LK_PARAMS
+                    )
                     
-                    if len(pts_local_valid) > 0:
-                        # 3) 선택적: 패치 다운스케일 (성능 향상)
-                        if ROI_PATCH_SCALE < 1.0:
-                            prev_patch_scaled = cv2.resize(prev_patch, None, fx=ROI_PATCH_SCALE, fy=ROI_PATCH_SCALE, 
-                                                          interpolation=cv2.INTER_AREA)
-                            curr_patch_scaled = cv2.resize(curr_patch, None, fx=ROI_PATCH_SCALE, fy=ROI_PATCH_SCALE, 
-                                                          interpolation=cv2.INTER_AREA)
-                            pts_scaled = (pts_local_valid * ROI_PATCH_SCALE).reshape(-1, 1, 2).astype(np.float32)
-                            
-                            # 4) 다운스케일된 패치에서 LK 계산
-                            p1, st, err = cv2.calcOpticalFlowPyrLK(
-                                prev_patch_scaled, curr_patch_scaled, pts_scaled, None, **LK_PARAMS
-                            )
-                            
-                            # 5) 결과를 원본 스케일로 복원
-                            if p1 is not None:
-                                p1 = p1 / ROI_PATCH_SCALE
-                        else:
-                            # 원본 크기로 LK 계산
-                            pts_local_reshaped = pts_local_valid.reshape(-1, 1, 2).astype(np.float32)
-                            p1, st, err = cv2.calcOpticalFlowPyrLK(
-                                prev_patch, curr_patch, pts_local_reshaped, None, **LK_PARAMS
-                            )
-                        
-                        # 6) 다시 전역 좌표로 변환
-                        if p1 is not None and st is not None:
-                            good_new_local = p1[st == 1].reshape(-1, 2)
-                            good_old_local = pts_local_valid[st.flatten() == 1]
-                            
-                            # 전역 좌표로 변환
-                            good_new = good_new_local + np.array([x, y], dtype=np.float32)
-                            
-                            # adaptive_mode 처리
-                            if adaptive_mode and len(good_new) >= MIN_POINTS_FOR_MOVE:
-                                centroid = calculate_centroid(good_new)
-                                if centroid is not None:
-                                    roi_rect = update_roi_position(roi_rect, centroid, W, H, ROI_MOVE_ALPHA)
-                                    
-                                    # 업데이트된 ROI 내부 포인트만 유지
-                                    mask_in = in_roi(good_new, roi_rect)
-                                    good_new = good_new[mask_in]
-                            else:
-                                # ROI 내부 포인트만 유지
-                                mask_in = in_roi(good_new, roi_rect)
-                                good_new = good_new[mask_in]
-                            
-                            if len(good_new) > 0:
-                                tracking_points = good_new.reshape(-1, 1, 2).astype(np.float32)
-                                centroid = calculate_centroid(good_new)
-                                if centroid is not None:
-                                    center_x, center_y = centroid.astype(int)
-                            else:
-                                tracking_points = None
-                            
-                            # 포인트가 부족하면 새로 검출
-                            if (tracking_points is None or len(tracking_points) < MIN_POINTS):
-                                tracking_points = detect_points_in_roi(gray, roi_rect)
+                    # 4) 결과를 원본 스케일로 복원
+                    if p1 is not None:
+                        p1 = p1 / LK_FRAME_SCALE
+                else:
+                    # 원본 크기로 LK 계산
+                    p1, st, err = cv2.calcOpticalFlowPyrLK(prev_frame, gray, tracking_points, None, **LK_PARAMS)
                 
-                # prev_frame 업데이트 (copy 불필요)
-                prev_frame = gray
+                if p1 is not None and st is not None:
+                    good_new = p1[st == 1]
+                    good_old = tracking_points[st == 1]
+
+                    if adaptive_mode and len(good_new) >= MIN_POINTS_FOR_MOVE:
+                        centroid = calculate_centroid(good_new)
+                        if centroid is not None:
+                            roi_rect = update_roi_position(roi_rect, centroid, W, H, ROI_MOVE_ALPHA)
+                            
+                            mask_in = in_roi(good_new, roi_rect)
+                            good_new = good_new[mask_in]
+                            good_old = good_old[mask_in]
+                    else:
+                        if roi_rect is not None:
+                            mask_in = in_roi(good_new, roi_rect)
+                            good_new = good_new[mask_in]
+                            good_old = good_old[mask_in]
+
+                    if len(good_new) > 0:
+                        tracking_points = good_new.reshape(-1, 1, 2).astype(np.float32)
+                        centroid = calculate_centroid(good_new)
+                        if centroid is not None:
+                            center_x, center_y = centroid.astype(int)
+                    else:
+                        tracking_points = None
+
+                    if (tracking_points is None or len(tracking_points) < MIN_POINTS) and roi_rect is not None:
+                        tracking_points = detect_points_in_roi(gray, roi_rect)
+
+                prev_frame = gray  # copy() 제거
 
             display_frame = frame
             zoom_x1 = zoom_y1 = 0
@@ -547,9 +517,9 @@ def main():
             cv2.putText(display_frame, f"Zoom: {zoom_level:.1f}x", (10, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
-            # ROI 패치 스케일 표시 (디버깅용)
-            if ROI_PATCH_SCALE < 1.0:
-                cv2.putText(display_frame, f"ROI Scale: {ROI_PATCH_SCALE:.1f}", (10, 105),
+            # LK 프레임 스케일 표시 (디버깅용)
+            if LK_FRAME_SCALE < 1.0:
+                cv2.putText(display_frame, f"LK Scale: {LK_FRAME_SCALE:.1f}", (10, 105),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
             if appsrc is not None:
