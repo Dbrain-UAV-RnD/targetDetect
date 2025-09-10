@@ -350,17 +350,21 @@ def process_new_coordinate(frame_bgr, device):
     if mask is None:
         return
 
+    # In process_new_coordinate function, replace feature extraction with:
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
     # Dynamic corner count based on mask area
     mask_area_ratio = (mask > 0).sum() / float(gray.size)
     dyn_corners = int(np.clip(30 + 300 * mask_area_ratio, 30, 150))
 
+    if mask.shape[:2] != gray.shape[:2]:
+        mask = cv2.resize(mask, (gray.shape[1], gray.shape[0]))
+
     params = FEATURE_PARAMS.copy()
     params['maxCorners'] = dyn_corners
     params['mask'] = mask
     corners = cv2.goodFeaturesToTrack(gray, **params)
-
+    
     if corners is not None:
         tracking_points = corners
         prev_frame = gray.copy()
