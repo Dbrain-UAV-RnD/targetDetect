@@ -22,7 +22,7 @@ MIN_POINTS = 3
 MAX_CORNERS = 50
 QUALITY_LEVEL = 0.01
 MIN_DISTANCE = 3
-GFTT_BLOCKSIZE = 10
+GFTT_BLOCKSIZE = 7
 
 # LK 계산용 프레임 다운스케일 비율 (0.5 = 50% 크기, 1.0 = 원본 크기)
 # 더 빠른 성능을 원하면 0.3~0.5 사용
