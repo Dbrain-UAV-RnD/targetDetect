@@ -18,7 +18,7 @@
 
 import os
 os.environ['GST_PLUGIN_PATH'] = os.environ.get('GST_PLUGIN_PATH', '/usr/lib/aarch64-linux-gnu/gstreamer-1.0')
-
+"zzzzzzzz"
 import cv2
 import numpy as np
 import socket
