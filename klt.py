@@ -26,7 +26,7 @@ GFTT_BLOCKSIZE = 7
 
 # ROI 패치 다운스케일 비율 (0.5 = 50% 크기, 1.0 = 원본 크기)
 # 더 빠른 성능을 원하면 0.5~0.7 사용
-ROI_PATCH_SCALE = 0.7
+ROI_PATCH_SCALE = 0.3
 
 LK_PARAMS = dict(
     winSize=(21, 21),
@@ -35,7 +35,7 @@ LK_PARAMS = dict(
 )
 
 ROI_MOVE_ALPHA = 1
-MIN_POINTS_FOR_MOVE = 15
+MIN_POINTS_FOR_MOVE = 1
 
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
