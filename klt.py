@@ -128,7 +128,7 @@ def build_output_pipeline(width, height, fps, host, port, bitrate_kbps):
         "appsrc name=source is-live=true format=3 do-timestamp=true ! "
         f"video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
         "videoconvert ! video/x-raw,format=I420 ! "
-        f"v4l2h264enc bitrate={bitrate_kbps*1000} ! "
+        f"v4l2h264enc bitrate={bitrate_kbps} ! "
         "h264parse ! rtph264pay config-interval=1 pt=96 ! "
         f"udpsink host={host} port={port} sync=false async=true"
     )
