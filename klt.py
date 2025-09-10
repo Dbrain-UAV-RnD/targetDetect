@@ -20,7 +20,7 @@ DEBUG_DRAW   = False
 ROI_SIZE = 120
 MIN_POINTS = 2
 MAX_CORNERS = 30
-QUALITY_LEVEL = 0.1
+QUALITY_LEVEL = 0.02
 MIN_DISTANCE = 5
 GFTT_BLOCKSIZE = 7
 
@@ -127,10 +127,12 @@ def build_output_pipeline(width, height, fps, host, port, bitrate_kbps):
     return (
         "appsrc name=source is-live=true format=3 do-timestamp=true ! "
         f"video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-        "videoconvert ! video/x-raw,format=I420 ! "
-        f"v4l2h264enc bitrate={bitrate_kbps} ! "
-        "h264parse ! rtph264pay config-interval=1 pt=96 ! "
-        f"udpsink host={host} port={port} sync=false async=true"
+        "videoconvert ! video/x-raw ! "
+        f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=1 ! "
+        "h264parse ! "
+        "rtph264pay config-interval=1 ! "
+        "queue max-size-buffers=400 max-size-time=0 max-size-bytes=0 ! "
+        f"udpsink host={host} port={port} buffer-size=2097152 sync=true async=false"
     )
 
 def clamp_roi(cx, cy, w, h, W, H):
