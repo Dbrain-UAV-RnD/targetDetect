@@ -44,18 +44,20 @@ DEBUG_DRAW   = False        # Heavy overlays (YOLO mask plots) off by default
 YOLO_IMGSZ   = 640          # Power-of-32 input (speeds up CPU inference)
 
 # LK / Shi–Tomasi parameters (leaner than defaults to reduce CPU)
-MAX_CORNERS      = 4
+MAX_CORNERS = 100  # Increased from 4
 FEATURE_PARAMS = dict(
     maxCorners=MAX_CORNERS,
-    qualityLevel=0.01,
-    minDistance=5,
-    blockSize=5,
-    mask=None
+    qualityLevel=0.02,  # Better quality
+    minDistance=10,     # More spread
+    blockSize=7,
+    useHarrisDetector=True,
+    k=0.04
 )
+
 LK_PARAMS = dict(
-    winSize=(15, 15),
-    maxLevel=2,
-    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03)
+    winSize=(21, 21),   # Larger window
+    maxLevel=3,         # More pyramid levels  
+    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
 )
 
 # UDP
@@ -350,10 +352,12 @@ def process_new_coordinate(frame_bgr, device):
 
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
-    if mask.shape[:2] != gray.shape[:2]:
-        mask = cv2.resize(mask, (gray.shape[1], gray.shape[0]))
+    # Dynamic corner count based on mask area
+    mask_area_ratio = (mask > 0).sum() / float(gray.size)
+    dyn_corners = int(np.clip(30 + 300 * mask_area_ratio, 30, 150))
 
     params = FEATURE_PARAMS.copy()
+    params['maxCorners'] = dyn_corners
     params['mask'] = mask
     corners = cv2.goodFeaturesToTrack(gray, **params)
 
@@ -505,40 +509,37 @@ def main():
                 tracking = False
                 failed_frames = 0
 
+            # Replace optical flow section with FB check:
             if tracking and tracking_points is not None and prev_frame is not None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-                next_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_frame, gray, tracking_points, None, **LK_PARAMS)
-
-                good_new = next_pts[status == 1] if next_pts is not None else np.array([])
-                # good_old = tracking_points[status == 1]  # not used for now
-
-                if good_new is not None and len(good_new) > 2:
-                    frame_count += 1
-
-                    if frame_count % RESEGMENT_INTERVAL == 0:
+                
+                # Forward tracking
+                next_pts, st1, _ = cv2.calcOpticalFlowPyrLK(prev_frame, gray, tracking_points, None, **LK_PARAMS)
+                
+                if next_pts is not None:
+                    # Backward tracking
+                    back_pts, st2, _ = cv2.calcOpticalFlowPyrLK(gray, prev_frame, next_pts, None, **LK_PARAMS)
+                    
+                    # FB error check
+                    fb_err = np.linalg.norm(tracking_points - back_pts, axis=2).reshape(-1)
+                    good = (st1.ravel() == 1) & (st2.ravel() == 1) & (fb_err < 1.5)
+                    good_new = next_pts[good]
+                else:
+                    good_new = np.array([])
+                
+                if len(good_new) > 2:
+                    # Use median instead of mean
+                    center_x, center_y = np.median(good_new.reshape(-1, 2), axis=0).astype(int)
+                    
+                    # Check scatter for resegmentation
+                    scatter = float(np.mean(np.std(good_new.reshape(-1, 2), axis=0)))
+                    
+                    if frame_count % RESEGMENT_INTERVAL == 0 or scatter > 6.0:
+                        # Trigger resegmentation
                         new_corners, _ = resegment_from_tracking_points(frame, good_new, device)
                         tracking_points = new_corners if new_corners is not None else good_new.reshape(-1, 1, 2)
                     else:
                         tracking_points = good_new.reshape(-1, 1, 2)
-
-                    if len(tracking_points.shape) == 3:
-                        center_x = int(np.mean(tracking_points[:, 0, 0]))
-                        center_y = int(np.mean(tracking_points[:, 0, 1]))
-                    else:
-                        center_x = int(np.mean(tracking_points[:, 0]))
-                        center_y = int(np.mean(tracking_points[:, 1]))
-
-                    prev_frame = gray.copy()
-                    failed_frames = 0
-                else:
-                    tracking = False
-                    tracking_points = None
-                    failed_frames += 1
-
-                if failed_frames > max_failed_frames:
-                    tracking = False
-                    failed_frames = 0
 
             # Zoomed display mapping (for overlays + back-mapping)
             display_frame = frame
