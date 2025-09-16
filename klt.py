@@ -24,7 +24,7 @@ QUALITY_LEVEL = 0.01
 MIN_DISTANCE = 7
 GFTT_BLOCKSIZE = 7
 
-LK_FRAME_SCALE = 0.8
+LK_FRAME_SCALE = 0.3
 
 LK_PARAMS = dict(
     winSize=(21, 21),
@@ -34,6 +34,7 @@ LK_PARAMS = dict(
 
 ROI_MOVE_ALPHA = 1
 MIN_POINTS_FOR_MOVE = 0
+LOCK_INITIAL_FEATURES = True
 
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
@@ -63,6 +64,7 @@ tracking_points = None
 roi_rect = None
 roi_center = None
 adaptive_mode = True
+feature_lock_active = False
 
 serial_port = None
 
@@ -186,7 +188,7 @@ def update_roi_position(roi_rect, target_center, W, H, alpha=ROI_MOVE_ALPHA):
     return clamp_roi(new_cx, new_cy, w, h, W, H)
 
 def udp_receiver():
-    global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center
+    global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center, feature_lock_active
 
     prev_x = prev_y = None
     prev_target_selected = None
@@ -242,6 +244,7 @@ def udp_receiver():
             elif data[6] == 0x00 and target_selected:
                 target_selected = False
                 tracking = False
+                feature_lock_active = False
 
             if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
                 zoom_command = 'zoom_in'
@@ -260,6 +263,7 @@ def udp_receiver():
 
 def process_new_coordinate(gray_frame):
     global latest_point, new_point_received, tracking, prev_frame, tracking_points, roi_rect, roi_center
+    global feature_lock_active
 
     if not new_point_received:
         return
@@ -279,10 +283,13 @@ def process_new_coordinate(gray_frame):
     if tracking_points is not None and len(tracking_points) > 0:
         prev_frame = gray_frame  # copy() 제거 - 불필요한 메모리 복사 방지
         tracking = True
+        feature_lock_active = LOCK_INITIAL_FEATURES
+    else:
+        feature_lock_active = False
 
 def main():
     global serial_port, tracking, prev_frame, tracking_points, roi_rect, roi_center
-    global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord
+    global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord, feature_lock_active
 
     try:
         Gst.init(None)
@@ -396,6 +403,7 @@ def main():
             center_x = center_y = 0
             if not target_selected:
                 tracking = False
+                feature_lock_active = False
 
             if tracking and tracking_points is not None and len(tracking_points) > 0 and prev_frame is not None:
                 H, W = gray.shape[:2]
@@ -468,9 +476,14 @@ def main():
                             center_x, center_y = centroid.astype(int)
                     else:
                         tracking_points = None
+                        tracking = False
+                        feature_lock_active = False
 
                     if (tracking_points is None or len(tracking_points) < MIN_POINTS) and roi_rect is not None:
-                        tracking_points = detect_points_in_roi(gray, roi_rect)
+                        if not (LOCK_INITIAL_FEATURES and feature_lock_active):
+                            tracking_points = detect_points_in_roi(gray, roi_rect)
+                            if tracking_points is not None and len(tracking_points) > 0:
+                                feature_lock_active = LOCK_INITIAL_FEATURES
 
                 prev_frame = gray  # copy() 제거
 
