@@ -281,7 +281,7 @@ def process_new_coordinate(gray_frame):
     tracking_points = detect_points_in_roi(gray_frame, roi_rect)
     
     if tracking_points is not None and len(tracking_points) > 0:
-        prev_frame = gray_frame  # copy() 제거 - 불필요한 메모리 복사 방지
+        prev_frame = gray_frame
         tracking = True
         feature_lock_active = LOCK_INITIAL_FEATURES
     else:
