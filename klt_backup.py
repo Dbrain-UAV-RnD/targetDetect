@@ -142,25 +142,14 @@ def clamp_roi(cx, cy, w, h, W, H):
 
 def detect_points_in_roi(gray, rect):
     x, y, w, h = rect
-    roi = gray[y:y+h, x:x+w]
-    if roi.size == 0:
-        return None
-
+    mask = np.zeros_like(gray, dtype=np.uint8)
+    mask[y:y+h, x:x+w] = 255
     pts = cv2.goodFeaturesToTrack(
-        roi,
-        maxCorners=MAX_CORNERS,
-        qualityLevel=QUALITY_LEVEL,
-        minDistance=MIN_DISTANCE,
-        mask=None,
-        blockSize=GFTT_BLOCKSIZE,
+        gray, maxCorners=MAX_CORNERS, qualityLevel=QUALITY_LEVEL,
+        minDistance=MIN_DISTANCE, mask=mask, blockSize=GFTT_BLOCKSIZE,
         useHarrisDetector=False
     )
-
-    if pts is None:
-        return None
-
-    offset = np.array([[[x, y]]], dtype=np.float32)
-    return pts + offset
+    return pts
 
 def in_roi(pts, rect):
     if pts is None or len(pts) == 0:
@@ -258,7 +247,7 @@ def udp_receiver():
         except Exception:
             pass
 
-def process_new_coordinate(gray_frame):
+def process_new_coordinate(frame_bgr):
     global latest_point, new_point_received, tracking, prev_frame, tracking_points, roi_rect, roi_center
 
     if not new_point_received:
@@ -267,17 +256,18 @@ def process_new_coordinate(gray_frame):
     new_point_received = False
     x, y = latest_point
 
-    if not (0 <= x < gray_frame.shape[1] and 0 <= y < gray_frame.shape[0]):
+    if not (0 <= x < frame_bgr.shape[1] and 0 <= y < frame_bgr.shape[0]):
         return
 
-    H, W = gray_frame.shape[:2]
+    H, W = frame_bgr.shape[:2]
     roi_rect = clamp_roi(x, y, ROI_SIZE, ROI_SIZE, W, H)
     roi_center = (x, y)
     
-    tracking_points = detect_points_in_roi(gray_frame, roi_rect)
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    tracking_points = detect_points_in_roi(gray, roi_rect)
     
     if tracking_points is not None and len(tracking_points) > 0:
-        prev_frame = gray_frame  # copy() 제거 - 불필요한 메모리 복사 방지
+        prev_frame = gray  # copy() 제거 - 불필요한 메모리 복사 방지
         tracking = True
 
 def main():
@@ -382,8 +372,6 @@ def main():
             if frame_counter % (TARGET_FPS * 4) == 0:
                 print(f"[{time.strftime('%H:%M:%S')}] frames: {frame_counter} tracking={tracking}")
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
             if zoom_command == 'zoom_in' and zoom_level < 3.0:
                 zoom_level += 0.5
                 zoom_command = None
@@ -391,57 +379,38 @@ def main():
                 zoom_level -= 0.5
                 zoom_command = None
 
-            process_new_coordinate(gray)
+            process_new_coordinate(frame)
 
             center_x = center_y = 0
             if not target_selected:
                 tracking = False
 
             if tracking and tracking_points is not None and len(tracking_points) > 0 and prev_frame is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 H, W = gray.shape[:2]
-                if roi_rect is not None:
-                    rx, ry, rw, rh = roi_rect
+                
+                # ========== 최적화: 프레임 다운스케일 후 LK 계산 ==========
+                if LK_FRAME_SCALE < 1.0:
+                    # 1) 프레임 다운스케일
+                    prev_scaled = cv2.resize(prev_frame, None, fx=LK_FRAME_SCALE, fy=LK_FRAME_SCALE, 
+                                            interpolation=cv2.INTER_AREA)
+                    gray_scaled = cv2.resize(gray, None, fx=LK_FRAME_SCALE, fy=LK_FRAME_SCALE, 
+                                            interpolation=cv2.INTER_AREA)
+                    
+                    # 2) 포인트 좌표 스케일 조정
+                    tracking_points_scaled = tracking_points * LK_FRAME_SCALE
+                    
+                    # 3) 다운스케일된 프레임에서 LK 계산
+                    p1, st, err = cv2.calcOpticalFlowPyrLK(
+                        prev_scaled, gray_scaled, tracking_points_scaled, None, **LK_PARAMS
+                    )
+                    
+                    # 4) 결과를 원본 스케일로 복원
+                    if p1 is not None:
+                        p1 = p1 / LK_FRAME_SCALE
                 else:
-                    rx, ry, rw, rh = 0, 0, W, H
-
-                rx = max(0, min(rx, W - 1))
-                ry = max(0, min(ry, H - 1))
-                rx2 = min(rx + rw, W)
-                ry2 = min(ry + rh, H)
-                roi_width = max(0, rx2 - rx)
-                roi_height = max(0, ry2 - ry)
-
-                p1 = None
-                st = err = None
-
-                if roi_width > 0 and roi_height > 0:
-                    prev_roi = prev_frame[ry:ry2, rx:rx2]
-                    gray_roi = gray[ry:ry2, rx:rx2]
-
-                    if prev_roi.size > 0 and gray_roi.size > 0:
-                        offset = np.array([[[rx, ry]]], dtype=np.float32)
-                        local_points = tracking_points - offset
-
-                        p1_local = None
-
-                        if LK_FRAME_SCALE < 1.0 and roi_width > 1 and roi_height > 1:
-                            scaled_w = max(1, int(roi_width * LK_FRAME_SCALE))
-                            scaled_h = max(1, int(roi_height * LK_FRAME_SCALE))
-                            prev_scaled = cv2.resize(prev_roi, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
-                            gray_scaled = cv2.resize(gray_roi, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
-                            scaled_points = local_points * LK_FRAME_SCALE
-                            p1_local, st, err = cv2.calcOpticalFlowPyrLK(
-                                prev_scaled, gray_scaled, scaled_points, None, **LK_PARAMS
-                            )
-                            if p1_local is not None:
-                                p1_local = p1_local / LK_FRAME_SCALE
-                        else:
-                            p1_local, st, err = cv2.calcOpticalFlowPyrLK(
-                                prev_roi, gray_roi, local_points, None, **LK_PARAMS
-                            )
-
-                        if p1_local is not None:
-                            p1 = p1_local + offset
+                    # 원본 크기로 LK 계산
+                    p1, st, err = cv2.calcOpticalFlowPyrLK(prev_frame, gray, tracking_points, None, **LK_PARAMS)
                 
                 if p1 is not None and st is not None:
                     good_new = p1[st == 1]
