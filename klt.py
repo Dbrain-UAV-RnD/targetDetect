@@ -2,18 +2,12 @@ import os
 os.environ['GST_PLUGIN_PATH'] = os.environ.get('GST_PLUGIN_PATH', '/usr/lib/aarch64-linux-gnu/gstreamer-1.0')
 
 # conda 환경에서 GObject Introspection 라이브러리 찾기 위한 설정
-gi_typelib_paths = [
-    '/usr/lib/aarch64-linux-gnu/girepository-1.0',
-    '/usr/lib/girepository-1.0',
-]
+gi_typelib_paths = ['/usr/lib/aarch64-linux-gnu/girepository-1.0', '/usr/lib/girepository-1.0',]
 existing_path = os.environ.get('GI_TYPELIB_PATH', '')
 os.environ['GI_TYPELIB_PATH'] = ':'.join(gi_typelib_paths + [existing_path] if existing_path else gi_typelib_paths)
 
 # 라이브러리 경로 설정
-ld_library_paths = [
-    '/usr/lib/aarch64-linux-gnu',
-    '/usr/lib',
-]
+ld_library_paths = ['/usr/lib/aarch64-linux-gnu', '/usr/lib',]
 existing_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
 os.environ['LD_LIBRARY_PATH'] = ':'.join(ld_library_paths + [existing_ld_path] if existing_ld_path else ld_library_paths)
 
@@ -189,12 +183,14 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.appsrc = None
         
         # appsrc 기반 파이프라인 생성
+        # 라즈베리파이5 하드웨어 인코더 (v4l2h264enc) 우선, 없으면 대안 사용
         pipeline = (
             f"appsrc name=source is-live=true format=3 do-timestamp=true "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-            "videoconvert ! video/x-raw ! "
-            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=30 ! "
-            "rtph264pay name=pay0 pt=96"
+            "videoconvert ! video/x-raw,format=I420 ! "
+            f"v4l2h264enc extra-controls=\"controls,video_bitrate={bitrate_kbps*1000}\" ! "
+            "video/x-h264,level=(string)4 ! "
+            "rtph264pay name=pay0 pt=96 config-interval=1"
         )
         self.set_launch(pipeline)
         self.set_shared(True)
@@ -698,4 +694,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
