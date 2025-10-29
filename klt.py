@@ -64,7 +64,7 @@ LOCK_INITIAL_FEATURES = True
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
 
-RTSP_PORT = 8554
+RTSP_PORT = 554
 RTSP_MOUNT_POINT = '/video0'
 BITRATE_KBPS = 6000
 
@@ -334,57 +334,146 @@ def udp_receiver():
     try:
         while True:
             try:
-                data, _ = udp_socket.recvfrom(10)
+                data, _ = udp_socket.recvfrom(64)  # 최대 패킷 크기를 충분히 크게
             except socket.timeout:
                 continue
             except Exception:
                 break
 
-            if len(data) < 10 or data[0] != 0x55 or data[1] != 0x66:
+            # 최소 패킷 크기 체크: 2(header) + 1 + 2(len) + 2 + 1 + 1(최소 data) + 2(crc) = 11
+            if len(data) < 11:
                 continue
 
-            received_crc = struct.unpack('<H', data[8:10])[0]
-            calculated_crc = crc16_modbus(0xFFFF, data[0:8], 8)
+            # 헤더 체크 (0x55 0x66으로 가정)
+            if data[0] != 0x55 or data[1] != 0x66:
+                continue
+
+            # 3번째 바이트가 1인지 체크
+            if data[2] != 0x01:
+                continue
+
+            # 데이터 길이 읽기 (리틀 엔디안)
+            data_length = struct.unpack('<H', data[3:5])[0]
+
+            # 4~5번째 바이트가 0인지 체크
+            if data[5] != 0x00 or data[6] != 0x00:
+                continue
+
+            # 전체 패킷 길이 계산: 2 + 1 + 2 + 2 + 1 + data_length + 2
+            expected_length = 10 + data_length
+            if len(data) < expected_length:
+                continue
+
+            # 명령 바이트 (0 또는 4~6)
+            cmd_byte = data[7]
+            if cmd_byte not in [0x00, 0x04, 0x05, 0x06]:
+                continue
+
+            # 가변 데이터 추출
+            var_data = data[8:8+data_length]
+
+            # CRC 체크
+            crc_start = 8 + data_length
+            if len(data) < crc_start + 2:
+                continue
+
+            received_crc = struct.unpack('<H', data[crc_start:crc_start+2])[0]
+            calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
 
             if received_crc != calculated_crc:
                 continue
 
-            x = struct.unpack('<H', data[2:4])[0]
-            y = struct.unpack('<H', data[4:6])[0]
+            # 명령 바이트 해석
+            # 0x00: TCP Heartbeat (가변 1바이트: 0x00 고정)
+            # 0x04: AI Mode (가변 1바이트: 0 또는 1)
+            # 0x05: Zoom Mode (가변 1바이트: -1/0/1)
+            # 0x06: Target Selection (가변 9바이트: 1바이트 선택여부 + 4바이트 x + 4바이트 y)
+            
+            x = y = None
+            is_target = False
+            zoom_cmd = 0x00
+            ai_mode = None
+            
+            if cmd_byte == 0x00:
+                # TCP Heartbeat - 아무 동작 안함
+                if data_length >= 1 and var_data[0] == 0x00:
+                    continue
+                    
+            elif cmd_byte == 0x04:
+                # AI Mode
+                if data_length >= 1:
+                    ai_mode = var_data[0]
+                    # AI 모드 활성화/비활성화 처리
+                    # 여기에 AI 모드 관련 로직 추가 가능
+                    
+            elif cmd_byte == 0x05:
+                # Zoom Mode
+                if data_length >= 1:
+                    zoom_value = struct.unpack('b', var_data[0:1])[0]  # signed byte
+                    if zoom_value == 1:
+                        zoom_cmd = 0x02  # zoom in
+                    elif zoom_value == -1:
+                        zoom_cmd = 0x01  # zoom out
+                    else:
+                        zoom_cmd = 0x00  # none
+                        
+            elif cmd_byte == 0x06:
+                # Target Selection (9바이트: 1바이트 선택여부 + 2바이트 x1 + 2바이트 y1 + 2바이트 x2 + 2바이트 y2)
+                if data_length >= 9:
+                    target_flag = var_data[0]
+                    x1 = struct.unpack('<H', var_data[1:3])[0]  # 좌상단 x
+                    y1 = struct.unpack('<H', var_data[3:5])[0]  # 좌상단 y
+                    x2 = struct.unpack('<H', var_data[5:7])[0]  # 우하단 x
+                    y2 = struct.unpack('<H', var_data[7:9])[0]  # 우하단 y
+                    
+                    # 중심점 계산
+                    x = (x1 + x2) // 2
+                    y = (y1 + y2) // 2
+                    is_target = (target_flag == 0x01)
 
-            is_target = (data[6] == 0xFF)
-            zoom_cmd = data[7]
+            # 중복 데이터 필터링 (heartbeat 제외)
+            if cmd_byte != 0x00:
+                if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
+                    continue
 
-            if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
-                continue
+                prev_x, prev_y = x, y
+                prev_target_selected = is_target
+                prev_zoom_cmd = zoom_cmd
 
-            prev_x, prev_y = x, y
-            prev_target_selected = is_target
-            prev_zoom_cmd = zoom_cmd
+            # Target Selection 처리 (cmd_byte == 0x06)
+            if cmd_byte == 0x06 and x is not None and y is not None:
+                orig_x, orig_y = x, y
+                try:
+                    orig_x, orig_y = display_to_original_coord(x, y)
+                except Exception:
+                    pass
 
-            orig_x, orig_y = x, y
-            try:
-                orig_x, orig_y = display_to_original_coord(x, y)
-            except Exception:
-                pass
+                if is_target:
+                    latest_point = (orig_x, orig_y)
+                    new_point_received = True
+                    target_selected = True
+                    # 타겟 선택 시 줌 센터 업데이트
+                    if zoom_center is None:
+                        zoom_center = (orig_x, orig_y)
+                else:
+                    # 타겟 선택 해제
+                    target_selected = False
+                    tracking = False
+                    feature_lock_active = False
 
-            if is_target:
-                latest_point = (orig_x, orig_y)
-                new_point_received = True
-                target_selected = True
-            elif data[6] == 0x00 and target_selected:
-                target_selected = False
-                tracking = False
-                feature_lock_active = False
-
-            if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
-                zoom_command = 'zoom_in'
-                zoom_center = (orig_x, orig_y)
-            elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
-                zoom_command = 'zoom_out'
-                zoom_center = (orig_x, orig_y)
-            elif zoom_cmd == 0x00:
-                zoom_command = None
+            # Zoom 명령 처리 (cmd_byte == 0x05)
+            if cmd_byte == 0x05:
+                if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
+                    zoom_command = 'zoom_in'
+                    # zoom_center가 없으면 화면 중앙으로
+                    if zoom_center is None:
+                        zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
+                elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
+                    zoom_command = 'zoom_out'
+                    if zoom_center is None:
+                        zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
+                elif zoom_cmd == 0x00:
+                    zoom_command = None
 
     finally:
         try:
