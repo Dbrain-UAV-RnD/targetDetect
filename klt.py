@@ -181,9 +181,9 @@ def send_data_to_serial(px, py, is_tracking, frame_w, frame_h):
 
 def gstreamer_camera_pipeline(width, height, fps):
     pipelines = [
-        f"v4l2src device=/dev/video0 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false",
-        f"v4l2src device=/dev/video1 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false",
-        f"libcamerasrc ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2 sync=false"
+        f"v4l2src device=/dev/video0 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false",
+        f"v4l2src device=/dev/video1 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false",
+        f"libcamerasrc ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false"
     ]
     return pipelines
 
@@ -203,8 +203,9 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
             f"appsrc name=source is-live=true format=3 do-timestamp=true "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
             "videoconvert ! video/x-raw,format=I420 ! "
-            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=veryfast key-int-max=30 bframes=0 ! "
-            "rtph264pay name=pay0 pt=96 config-interval=1"
+            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=ultrafast key-int-max=30 bframes=0 "
+            f"rc-lookahead=0 sync-lookahead=0 sliced-threads=true ! "
+            "rtph264pay name=pay0 pt=96 config-interval=1 aggregate-mode=zero-latency"
         )
         self.set_launch(pipeline)
         self.set_shared(True)
@@ -227,6 +228,9 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
                 appsrc.set_property('block', False)
                 appsrc.set_property('max-bytes', 0)
                 appsrc.set_property('emit-signals', False)
+                appsrc.set_property('min-latency', 0)
+                appsrc.set_property('max-latency', 0)
+                appsrc.set_property('leaky-type', 2)
 
     @property
     def appsrc(self):
