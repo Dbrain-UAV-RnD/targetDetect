@@ -73,7 +73,7 @@ TCP_PORT = 37260
 RTSP_PORT = 8554
 RTSP_MOUNT_POINT = '/video0'
 BITRATE_KBPS = 6000
-
+##
 SERIAL_CANDIDATES = [
     '/dev/serial0',
     '/dev/ttyAMA10'
