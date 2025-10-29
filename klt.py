@@ -29,6 +29,18 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GstRtspServer, GLib
 
+def get_local_ip():
+    """로컬 IP 주소 가져오기"""
+    try:
+        # 실제 네트워크 연결을 통한 IP 주소 확인
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "Unknown"
+
 FRAME_WIDTH  = 1280
 FRAME_HEIGHT = 720
 TARGET_FPS   = 30
@@ -188,6 +200,8 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.bitrate_kbps = bitrate_kbps
         self.appsrc = None
         self.client_connected = False
+        self.frame_count = 0
+        self.last_debug_time = time.time()
         
         # appsrc 기반 파이프라인 생성
         pipeline = (
@@ -200,22 +214,36 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.set_launch(pipeline)
         self.set_shared(True)
         
+        print(f"[RTSP] Factory initialized")
+        print(f"[RTSP] Pipeline: {pipeline}")
+        
         # media가 준비되면 appsrc를 가져오기 위한 시그널 연결
         self.connect("media-configure", self.on_media_configure)
     
     def on_media_configure(self, factory, media):
         """미디어가 설정될 때 appsrc 참조 가져오기"""
+        print("[RTSP] on_media_configure called")
         element = media.get_element()
         if element:
+            print("[RTSP] Got media element")
             self.appsrc = element.get_by_name("source")
             if self.appsrc:
                 self.client_connected = True
-                print("\n[RTSP] Client connected! Starting video stream...")
-                print(f"[RTSP] Pipeline: {element}")
+                print("\n" + "="*60)
+                print("[RTSP] ✓✓✓ CLIENT CONNECTED! ✓✓✓")
+                print("[RTSP] Starting video stream...")
+                print(f"[RTSP] Resolution: {self.width}x{self.height} @ {self.fps}fps")
+                print(f"[RTSP] Bitrate: {self.bitrate_kbps} kbps")
+                print("="*60 + "\n")
                 
                 # appsrc 속성 설정
                 self.appsrc.set_property('format', Gst.Format.TIME)
                 self.appsrc.set_property('block', False)
+                print("[RTSP] appsrc properties set")
+            else:
+                print("[RTSP] ✗ Failed to get appsrc from element")
+        else:
+            print("[RTSP] ✗ Failed to get media element")
 
 def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     """RTSP 서버 설정 및 시작"""
@@ -232,17 +260,23 @@ def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     
     server.attach(None)
     
+    # 로컬 IP 주소 자동 감지
+    local_ip = get_local_ip()
+    
     print("=" * 60)
     print("RTSP Server Started Successfully!")
     print("=" * 60)
     print(f"Local:    rtsp://127.0.0.1:{port}{mount_point}")
-    print(f"Network:  rtsp://192.168.10.219:{port}{mount_point}")
+    if local_ip != "Unknown":
+        print(f"Network:  rtsp://{local_ip}:{port}{mount_point}")
+    else:
+        print(f"Network:  rtsp://192.168.10.219:{port}{mount_point} (check your IP)")
     print(f"Port:     {port}")
     print(f"Binding:  0.0.0.0 (all interfaces)")
     print("=" * 60)
     print("\nWaiting for client connections...")
-    print("Test with: ffplay -rtsp_transport tcp rtsp://192.168.10.219:544/video0")
-    print("Or VLC:    rtsp://192.168.10.219:544/video0")
+    print(f"Test with: ffplay -rtsp_transport tcp rtsp://{local_ip if local_ip != 'Unknown' else '192.168.10.219'}:{port}{mount_point}")
+    print(f"Or VLC:    rtsp://{local_ip if local_ip != 'Unknown' else '192.168.10.219'}:{port}{mount_point}")
     print("=" * 60)
     
     return server, factory
@@ -413,29 +447,44 @@ def main():
     global serial_port, tracking, prev_frame, tracking_points, roi_rect, roi_center
     global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord, feature_lock_active
 
+    print("\n" + "="*60)
+    print("STARTING TRACKING SYSTEM WITH RTSP SERVER")
+    print("="*60 + "\n")
+
     try:
         Gst.init(None)
-        print("GStreamer initialized successfully")
+        print("[INIT] ✓ GStreamer initialized successfully")
     except Exception as e:
-        print(f"GStreamer initialization failed: {e}")
+        print(f"[INIT] ✗ GStreamer initialization failed: {e}")
+        return
 
     serial_port = setup_serial()
+    if serial_port:
+        print(f"[INIT] ✓ Serial port opened: {serial_port.port}")
+    else:
+        print("[INIT] ✗ Serial port not available")
 
     # GLib MainLoop를 별도 스레드에서 실행
+    print("[INIT] Starting GLib MainLoop thread...")
     mainloop = GLib.MainLoop()
     mainloop_thread = threading.Thread(target=mainloop.run, daemon=True)
     mainloop_thread.start()
+    print("[INIT] ✓ GLib MainLoop thread started")
 
     # RTSP 서버 시작
+    print("[INIT] Initializing RTSP server...")
     rtsp_server, rtsp_factory = setup_rtsp_server(
         RTSP_PORT, RTSP_MOUNT_POINT, 
         FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, BITRATE_KBPS
     )
     
     # UDP 수신 스레드 시작
+    print("[INIT] Starting UDP receiver thread...")
     udp_thread = threading.Thread(target=udp_receiver, daemon=True)
     udp_thread.start()
+    print(f"[INIT] ✓ UDP receiver listening on {UDP_HOST}:{UDP_PORT}")
 
+    print("\n[INIT] Opening camera...")
     cap_pipelines = gstreamer_camera_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS)
     cap = None
     
@@ -488,28 +537,44 @@ def main():
                     cap = None
     
     if cap is None:
+        print("[CAMERA] ✗ Failed to open camera with any method")
         raise RuntimeError("Failed to open camera with any method. Check camera connections and permissions.")
 
+    print("[CAMERA] ✓ Camera opened successfully")
+    
     # appsrc는 RTSP factory에서 관리
     appsrc = None
     
-    print("Waiting for RTSP client connection to start streaming...")
-    print(f"Connect to: rtsp://192.168.10.219:{RTSP_PORT}{RTSP_MOUNT_POINT}")
+    print("\n" + "="*60)
+    print("SYSTEM READY!")
+    print("="*60)
+    print(f"RTSP Stream: rtsp://192.168.10.219:{RTSP_PORT}{RTSP_MOUNT_POINT}")
+    print(f"UDP Control: {UDP_HOST}:{UDP_PORT}")
+    print("="*60 + "\n")
+    print("[MAIN] Starting main loop...")
+    print("[MAIN] Camera frames will be captured and sent to RTSP clients\n")
 
     last_serial_time = 0.0
     serial_interval = 1.0 / float(TARGET_FPS)
     frame_counter = 0
+    first_frame_logged = False
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
+                if frame_counter == 0:
+                    print("[CAMERA] ✗ Failed to read first frame")
                 time.sleep(0.005)
                 continue
 
+            if not first_frame_logged:
+                print(f"[CAMERA] ✓ First frame captured: {frame.shape[1]}x{frame.shape[0]}")
+                first_frame_logged = True
+
             frame_counter += 1
-            if frame_counter % (TARGET_FPS * 4) == 0:
-                print(f"[{time.strftime('%H:%M:%S')}] frames: {frame_counter} tracking={tracking}")
+            if frame_counter % (TARGET_FPS * 10) == 0:  # 10초마다
+                print(f"[{time.strftime('%H:%M:%S')}] Camera frames: {frame_counter}, tracking={tracking}, RTSP clients={int(rtsp_factory.client_connected)})")
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -700,14 +765,37 @@ def main():
                     buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
                     buf.fill(0, display_frame.tobytes())
                     ret = rtsp_factory.appsrc.emit("push-buffer", buf)
+                    
+                    rtsp_factory.frame_count += 1
+                    
+                    # 처음 프레임 전송 시 알림
+                    if rtsp_factory.frame_count == 1:
+                        print(f"\n[RTSP] ✓✓✓ FIRST FRAME SENT SUCCESSFULLY! ✓✓✓")
+                        print(f"[RTSP] Frame size: {display_frame.nbytes} bytes")
+                        print(f"[RTSP] Resolution: {display_frame.shape[1]}x{display_frame.shape[0]}\n")
+                    
+                    # 5초마다 상태 출력
+                    now = time.time()
+                    if now - rtsp_factory.last_debug_time >= 5.0:
+                        print(f"[RTSP] Streaming OK: {rtsp_factory.frame_count} frames sent")
+                        rtsp_factory.last_debug_time = now
+                    
                     if ret != Gst.FlowReturn.OK:
                         # 클라이언트 연결 해제 등의 상황
-                        if frame_counter % (TARGET_FPS * 2) == 0:
-                            print(f"[RTSP] Buffer push returned: {ret}")
+                        print(f"[RTSP] ✗ Buffer push failed: {ret}")
+                        if ret == Gst.FlowReturn.FLUSHING:
+                            print("[RTSP] Client disconnected or pipeline flushing")
+                        elif ret == Gst.FlowReturn.EOS:
+                            print("[RTSP] End of stream")
+                        rtsp_factory.client_connected = False
                 except Exception as e:
-                    # 에러 발생 시 무시 (클라이언트가 아직 연결 안됨 등)
+                    # 에러 발생 시
                     if frame_counter % (TARGET_FPS * 4) == 0:
-                        print(f"[RTSP] Push error: {e}")
+                        print(f"[RTSP] ✗ Push error: {e}")
+            else:
+                # appsrc가 None - 클라이언트 연결 대기 중
+                if frame_counter % (TARGET_FPS * 10) == 0:  # 10초마다
+                    print("[RTSP] Waiting for client connection...")
 
             if os.path.exists("stop.signal"):
                 break
