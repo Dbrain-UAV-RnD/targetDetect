@@ -667,15 +667,12 @@ def main():
 
     except KeyboardInterrupt:
         pass
-    
     finally:
-
         try:
             if cap is not None:
                 cap.release()
         except Exception:
             pass
-
         try:
             if serial_port and serial_port.is_open:
                 serial_port.close()
