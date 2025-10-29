@@ -1,6 +1,22 @@
 import os
 os.environ['GST_PLUGIN_PATH'] = os.environ.get('GST_PLUGIN_PATH', '/usr/lib/aarch64-linux-gnu/gstreamer-1.0')
 
+# conda 환경에서 GObject Introspection 라이브러리 찾기 위한 설정
+gi_typelib_paths = [
+    '/usr/lib/aarch64-linux-gnu/girepository-1.0',
+    '/usr/lib/girepository-1.0',
+]
+existing_path = os.environ.get('GI_TYPELIB_PATH', '')
+os.environ['GI_TYPELIB_PATH'] = ':'.join(gi_typelib_paths + [existing_path] if existing_path else gi_typelib_paths)
+
+# 라이브러리 경로 설정
+ld_library_paths = [
+    '/usr/lib/aarch64-linux-gnu',
+    '/usr/lib',
+]
+existing_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+os.environ['LD_LIBRARY_PATH'] = ':'.join(ld_library_paths + [existing_ld_path] if existing_ld_path else ld_library_paths)
+
 import cv2
 import numpy as np
 import socket
@@ -682,3 +698,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
