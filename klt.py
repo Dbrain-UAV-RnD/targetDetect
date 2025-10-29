@@ -10,8 +10,7 @@ import time
 import serial
 import gi
 gi.require_version('Gst', '1.0')
-gi.require_version('GstRtspServer', '1.0')
-from gi.repository import Gst, GstRtspServer, GLib
+from gi.repository import Gst
 
 FRAME_WIDTH  = 1280
 FRAME_HEIGHT = 720
@@ -40,10 +39,7 @@ LOCK_INITIAL_FEATURES = True
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
 
-# RTSP 서버 설정
-RTSP_HOST = '192.168.10.219'
-RTSP_PORT = 544
-RTSP_MOUNT_POINT = '/video0'
+RTSP_URL = 'rtsp://192.168.10.219:544/video0'
 BITRATE_KBPS = 6000
 
 SERIAL_CANDIDATES = [
@@ -67,7 +63,6 @@ adaptive_mode = True
 feature_lock_active = False
 
 serial_port = None
-appsrc = None
 
 crc16_table = [0x0000, 0xc0c1, 0xc181, 0x0140, 0xc301, 0x03c0, 0x0280, 0xc241, 
     0xc601, 0x06c0, 0x0780, 0xc741, 0x0500, 0xc5c1, 0xc481, 0x0440, 
@@ -166,38 +161,16 @@ def gstreamer_camera_pipeline(width, height, fps):
     ]
     return pipelines
 
-def setup_rtsp_server(width, height, fps, host, port, mount_point, bitrate_kbps):
-    """RTSP 서버 설정"""
-    global appsrc
-    
-    server = GstRtspServer.RTSPServer()
-    server.set_address(host)
-    server.set_service(str(port))
-    
-    factory = GstRtspServer.RTSPMediaFactory()
-    
-    # RTSP 파이프라인 설정 (appsrc를 사용하여 프레임을 푸시)
-    launch_string = (
-        "( appsrc name=source is-live=true format=3 do-timestamp=true ! "
+def build_output_pipeline(width, height, fps, rtsp_url, bitrate_kbps):
+    return (
+        "appsrc name=source is-live=true format=3 do-timestamp=true ! "
         f"video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
         "videoconvert ! video/x-raw ! "
-        f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max={fps} ! "
+        f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=1 ! "
         "h264parse ! "
-        "rtph264pay name=pay0 pt=96 config-interval=1 )"
+        "rtph264pay config-interval=1 ! "
+        f"rtspclientsink location={rtsp_url} protocols=tcp"
     )
-    
-    factory.set_launch(launch_string)
-    factory.set_shared(True)
-    
-    mounts = server.get_mount_points()
-    mounts.add_factory(mount_point, factory)
-    
-    # 서버 시작
-    server.attach(None)
-    
-    print(f"RTSP server started at rtsp://{host}:{port}{mount_point}")
-    
-    return server, factory
 
 def clamp_roi(cx, cy, w, h, W, H):
     x = int(cx - w // 2)
@@ -361,57 +334,20 @@ def process_new_coordinate(gray_frame):
     else:
         feature_lock_active = False
 
-def push_frame_to_rtsp(frame):
-    global appsrc
-    
-    if appsrc is None:
-        return False
-        
-    try:
-        buf = Gst.Buffer.new_allocate(None, frame.nbytes, None)
-        buf.fill(0, frame.tobytes())
-        ret = appsrc.emit("push-buffer", buf)
-        return ret == Gst.FlowReturn.OK
-    except Exception as e:
-        print(f"Failed to push frame to RTSP: {e}")
-        return False
-
 def main():
     global serial_port, tracking, prev_frame, tracking_points, roi_rect, roi_center
     global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord, feature_lock_active
-    global appsrc
 
     try:
         Gst.init(None)
         print("GStreamer initialized successfully")
     except Exception as e:
         print(f"GStreamer initialization failed: {e}")
-        return
 
     serial_port = setup_serial()
 
     udp_thread = threading.Thread(target=udp_receiver, daemon=True)
     udp_thread.start()
-
-    # RTSP 서버 설정
-    try:
-        rtsp_server, rtsp_factory = setup_rtsp_server(
-            FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, 
-            RTSP_HOST, RTSP_PORT, RTSP_MOUNT_POINT, BITRATE_KBPS
-        )
-        print(f"Access stream at: rtsp://{RTSP_HOST}:{RTSP_PORT}{RTSP_MOUNT_POINT}")
-        
-        # GLib 메인 루프를 별도 스레드에서 실행
-        mainloop = GLib.MainLoop()
-        mainloop_thread = threading.Thread(target=mainloop.run, daemon=True)
-        mainloop_thread.start()
-        
-        # appsrc 획득을 위한 대기 (factory에서 파이프라인 생성 후)
-        time.sleep(1)
-        
-    except Exception as e:
-        print(f"RTSP server setup failed: {e}")
-        return
 
     cap_pipelines = gstreamer_camera_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS)
     cap = None
@@ -467,11 +403,27 @@ def main():
     if cap is None:
         raise RuntimeError("Failed to open camera with any method. Check camera connections and permissions.")
 
+    pipeline = None
+    appsrc = None
+    try:
+        pipeline_str = build_output_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, RTSP_URL, BITRATE_KBPS)
+        pipeline = Gst.parse_launch(pipeline_str)
+        appsrc = pipeline.get_by_name("source")
+        caps = Gst.Caps.from_string(
+            f"video/x-raw,format=BGR,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={TARGET_FPS}/1"
+        )
+        appsrc.set_property("caps", caps)
+        pipeline.set_state(Gst.State.PLAYING)
+        print(f"GStreamer RTSP output pipeline initialized: {RTSP_URL}")
+    except Exception as e:
+        print(f"GStreamer output pipeline failed: {e}")
+        print("Continuing without video streaming output")
+        pipeline = None
+        appsrc = None
+
     last_serial_time = 0.0
     serial_interval = 1.0 / float(TARGET_FPS)
     frame_counter = 0
-
-    print("Starting video processing loop...")
 
     try:
         while True:
@@ -654,21 +606,37 @@ def main():
             cv2.putText(display_frame, f"Zoom: {zoom_level:.1f}x", (10, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
+            # LK 프레임 스케일 표시 (디버깅용)
             if LK_FRAME_SCALE < 1.0:
                 cv2.putText(display_frame, f"LK Scale: {LK_FRAME_SCALE:.1f}", (10, 105),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-            # RTSP로 프레임 송출
-            push_frame_to_rtsp(display_frame)
+            if appsrc is not None:
+                try:
+                    buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
+                    buf.fill(0, display_frame.tobytes())
+                    appsrc.emit("push-buffer", buf)
+                except Exception as e:
+                    print(f"GStreamer buffer push failed: {e}")
+                    appsrc = None
 
             if os.path.exists("stop.signal"):
                 break
 
     except KeyboardInterrupt:
         pass
-
+    
     finally:
-
+        try:
+            if appsrc is not None:
+                appsrc.emit("end-of-stream")
+        except Exception:
+            pass
+        try:
+            if pipeline is not None:
+                pipeline.set_state(Gst.State.NULL)
+        except Exception:
+            pass
         try:
             if cap is not None:
                 cap.release()
