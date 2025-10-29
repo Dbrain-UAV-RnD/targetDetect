@@ -10,7 +10,8 @@ import time
 import serial
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst
+gi.require_version('GstRtspServer', '1.0')
+from gi.repository import Gst, GstRtspServer, GLib
 
 FRAME_WIDTH  = 1280
 FRAME_HEIGHT = 720
@@ -39,7 +40,8 @@ LOCK_INITIAL_FEATURES = True
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
 
-RTSP_URL = 'rtsp://192.168.10.219:544/video0'
+RTSP_PORT = 544
+RTSP_MOUNT_POINT = '/video0'
 BITRATE_KBPS = 6000
 
 SERIAL_CANDIDATES = [
@@ -161,16 +163,52 @@ def gstreamer_camera_pipeline(width, height, fps):
     ]
     return pipelines
 
-def build_output_pipeline(width, height, fps, rtsp_url, bitrate_kbps):
-    return (
-        "appsrc name=source is-live=true format=3 do-timestamp=true ! "
-        f"video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-        "videoconvert ! video/x-raw ! "
-        f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=1 ! "
-        "h264parse ! "
-        "rtph264pay config-interval=1 ! "
-        f"rtspclientsink location={rtsp_url} protocols=tcp"
-    )
+class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
+    def __init__(self, width, height, fps, bitrate_kbps):
+        super().__init__()
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.bitrate_kbps = bitrate_kbps
+        self.appsrc = None
+        
+        # appsrc 기반 파이프라인 생성
+        pipeline = (
+            f"appsrc name=source is-live=true format=3 do-timestamp=true "
+            f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
+            "videoconvert ! video/x-raw ! "
+            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=30 ! "
+            "rtph264pay name=pay0 pt=96"
+        )
+        self.set_launch(pipeline)
+        self.set_shared(True)
+        
+        # media가 준비되면 appsrc를 가져오기 위한 시그널 연결
+        self.connect("media-configure", self.on_media_configure)
+    
+    def on_media_configure(self, factory, media):
+        """미디어가 설정될 때 appsrc 참조 가져오기"""
+        element = media.get_element()
+        if element:
+            self.appsrc = element.get_by_name("source")
+            if self.appsrc:
+                print("appsrc configured successfully")
+
+def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
+    """RTSP 서버 설정 및 시작"""
+    server = GstRtspServer.RTSPServer()
+    server.set_service(str(port))
+    
+    factory = RTSPServerFactory(width, height, fps, bitrate_kbps)
+    
+    mounts = server.get_mount_points()
+    mounts.add_factory(mount_point, factory)
+    
+    server.attach(None)
+    
+    print(f"RTSP Server started at rtsp://192.168.10.219:{port}{mount_point}")
+    print(f"Connect using: rtsp://192.168.10.219:{port}{mount_point}")
+    return server, factory
 
 def clamp_roi(cx, cy, w, h, W, H):
     x = int(cx - w // 2)
@@ -346,6 +384,18 @@ def main():
 
     serial_port = setup_serial()
 
+    # GLib MainLoop를 별도 스레드에서 실행
+    mainloop = GLib.MainLoop()
+    mainloop_thread = threading.Thread(target=mainloop.run, daemon=True)
+    mainloop_thread.start()
+
+    # RTSP 서버 시작
+    rtsp_server, rtsp_factory = setup_rtsp_server(
+        RTSP_PORT, RTSP_MOUNT_POINT, 
+        FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, BITRATE_KBPS
+    )
+    
+    # UDP 수신 스레드 시작
     udp_thread = threading.Thread(target=udp_receiver, daemon=True)
     udp_thread.start()
 
@@ -403,23 +453,11 @@ def main():
     if cap is None:
         raise RuntimeError("Failed to open camera with any method. Check camera connections and permissions.")
 
-    pipeline = None
+    # appsrc는 RTSP factory에서 관리
     appsrc = None
-    try:
-        pipeline_str = build_output_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, RTSP_URL, BITRATE_KBPS)
-        pipeline = Gst.parse_launch(pipeline_str)
-        appsrc = pipeline.get_by_name("source")
-        caps = Gst.Caps.from_string(
-            f"video/x-raw,format=BGR,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={TARGET_FPS}/1"
-        )
-        appsrc.set_property("caps", caps)
-        pipeline.set_state(Gst.State.PLAYING)
-        print(f"GStreamer RTSP output pipeline initialized: {RTSP_URL}")
-    except Exception as e:
-        print(f"GStreamer output pipeline failed: {e}")
-        print("Continuing without video streaming output")
-        pipeline = None
-        appsrc = None
+    
+    print("Waiting for RTSP client connection to start streaming...")
+    print(f"Connect to: rtsp://192.168.10.219:{RTSP_PORT}{RTSP_MOUNT_POINT}")
 
     last_serial_time = 0.0
     serial_interval = 1.0 / float(TARGET_FPS)
@@ -611,14 +649,18 @@ def main():
                 cv2.putText(display_frame, f"LK Scale: {LK_FRAME_SCALE:.1f}", (10, 105),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-            if appsrc is not None:
+            # RTSP 스트리밍 - factory의 appsrc가 준비되면 프레임 푸시
+            if rtsp_factory.appsrc is not None:
                 try:
                     buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
                     buf.fill(0, display_frame.tobytes())
-                    appsrc.emit("push-buffer", buf)
+                    ret = rtsp_factory.appsrc.emit("push-buffer", buf)
+                    if ret != Gst.FlowReturn.OK:
+                        # 클라이언트 연결 해제 등의 상황
+                        pass
                 except Exception as e:
-                    print(f"GStreamer buffer push failed: {e}")
-                    appsrc = None
+                    # 에러 발생 시 무시 (클라이언트가 아직 연결 안됨 등)
+                    pass
 
             if os.path.exists("stop.signal"):
                 break
@@ -627,16 +669,7 @@ def main():
         pass
     
     finally:
-        try:
-            if appsrc is not None:
-                appsrc.emit("end-of-stream")
-        except Exception:
-            pass
-        try:
-            if pipeline is not None:
-                pipeline.set_state(Gst.State.NULL)
-        except Exception:
-            pass
+
         try:
             if cap is not None:
                 cap.release()
@@ -648,6 +681,7 @@ def main():
                 serial_port.close()
         except Exception:
             pass
+        print("Cleanup completed")
 
 if __name__ == "__main__":
     main()
