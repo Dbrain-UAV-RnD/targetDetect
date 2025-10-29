@@ -2,12 +2,18 @@ import os
 os.environ['GST_PLUGIN_PATH'] = os.environ.get('GST_PLUGIN_PATH', '/usr/lib/aarch64-linux-gnu/gstreamer-1.0')
 
 # conda 환경에서 GObject Introspection 라이브러리 찾기 위한 설정
-gi_typelib_paths = ['/usr/lib/aarch64-linux-gnu/girepository-1.0', '/usr/lib/girepository-1.0',]
+gi_typelib_paths = [
+    '/usr/lib/aarch64-linux-gnu/girepository-1.0',
+    '/usr/lib/girepository-1.0',
+]
 existing_path = os.environ.get('GI_TYPELIB_PATH', '')
 os.environ['GI_TYPELIB_PATH'] = ':'.join(gi_typelib_paths + [existing_path] if existing_path else gi_typelib_paths)
 
 # 라이브러리 경로 설정
-ld_library_paths = ['/usr/lib/aarch64-linux-gnu', '/usr/lib',]
+ld_library_paths = [
+    '/usr/lib/aarch64-linux-gnu',
+    '/usr/lib',
+]
 existing_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
 os.environ['LD_LIBRARY_PATH'] = ':'.join(ld_library_paths + [existing_ld_path] if existing_ld_path else ld_library_paths)
 
@@ -181,6 +187,7 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.fps = fps
         self.bitrate_kbps = bitrate_kbps
         self.appsrc = None
+        self.client_connected = False
         
         # appsrc 기반 파이프라인 생성
         pipeline = (
@@ -202,11 +209,20 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         if element:
             self.appsrc = element.get_by_name("source")
             if self.appsrc:
-                print("appsrc configured successfully")
+                self.client_connected = True
+                print("\n[RTSP] Client connected! Starting video stream...")
+                print(f"[RTSP] Pipeline: {element}")
+                
+                # appsrc 속성 설정
+                self.appsrc.set_property('format', Gst.Format.TIME)
+                self.appsrc.set_property('block', False)
 
 def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     """RTSP 서버 설정 및 시작"""
     server = GstRtspServer.RTSPServer()
+    
+    # 모든 네트워크 인터페이스에 바인딩 (0.0.0.0)
+    server.set_address("0.0.0.0")
     server.set_service(str(port))
     
     factory = RTSPServerFactory(width, height, fps, bitrate_kbps)
@@ -216,8 +232,19 @@ def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     
     server.attach(None)
     
-    print(f"RTSP Server started at rtsp://192.168.10.219:{port}{mount_point}")
-    print(f"Connect using: rtsp://192.168.10.219:{port}{mount_point}")
+    print("=" * 60)
+    print("RTSP Server Started Successfully!")
+    print("=" * 60)
+    print(f"Local:    rtsp://127.0.0.1:{port}{mount_point}")
+    print(f"Network:  rtsp://192.168.10.219:{port}{mount_point}")
+    print(f"Port:     {port}")
+    print(f"Binding:  0.0.0.0 (all interfaces)")
+    print("=" * 60)
+    print("\nWaiting for client connections...")
+    print("Test with: ffplay -rtsp_transport tcp rtsp://192.168.10.219:544/video0")
+    print("Or VLC:    rtsp://192.168.10.219:544/video0")
+    print("=" * 60)
+    
     return server, factory
 
 def clamp_roi(cx, cy, w, h, W, H):
@@ -659,6 +686,14 @@ def main():
                 cv2.putText(display_frame, f"LK Scale: {LK_FRAME_SCALE:.1f}", (10, 105),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
+            # RTSP 클라이언트 연결 상태 표시
+            if rtsp_factory.client_connected:
+                cv2.putText(display_frame, "RTSP: STREAMING", (10, 130),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            else:
+                cv2.putText(display_frame, "RTSP: WAITING", (10, 130),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
             # RTSP 스트리밍 - factory의 appsrc가 준비되면 프레임 푸시
             if rtsp_factory.appsrc is not None:
                 try:
@@ -667,10 +702,12 @@ def main():
                     ret = rtsp_factory.appsrc.emit("push-buffer", buf)
                     if ret != Gst.FlowReturn.OK:
                         # 클라이언트 연결 해제 등의 상황
-                        pass
+                        if frame_counter % (TARGET_FPS * 2) == 0:
+                            print(f"[RTSP] Buffer push returned: {ret}")
                 except Exception as e:
                     # 에러 발생 시 무시 (클라이언트가 아직 연결 안됨 등)
-                    pass
+                    if frame_counter % (TARGET_FPS * 4) == 0:
+                        print(f"[RTSP] Push error: {e}")
 
             if os.path.exists("stop.signal"):
                 break
@@ -692,3 +729,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
