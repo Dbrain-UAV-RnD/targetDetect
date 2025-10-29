@@ -50,7 +50,7 @@ LOCK_INITIAL_FEATURES = True
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
 
-RTSP_PORT = 8554
+RTSP_PORT = 544
 RTSP_MOUNT_POINT = '/video0'
 BITRATE_KBPS = 6000
 
@@ -183,14 +183,12 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.appsrc = None
         
         # appsrc 기반 파이프라인 생성
-        # 라즈베리파이5 하드웨어 인코더 (v4l2h264enc) 우선, 없으면 대안 사용
         pipeline = (
             f"appsrc name=source is-live=true format=3 do-timestamp=true "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-            "videoconvert ! video/x-raw,format=I420 ! "
-            f"v4l2h264enc extra-controls=\"controls,video_bitrate={bitrate_kbps*1000}\" ! "
-            "video/x-h264,level=(string)4 ! "
-            "rtph264pay name=pay0 pt=96 config-interval=1"
+            "videoconvert ! video/x-raw ! "
+            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=30 ! "
+            "rtph264pay name=pay0 pt=96"
         )
         self.set_launch(pipeline)
         self.set_shared(True)
