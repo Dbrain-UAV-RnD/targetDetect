@@ -203,7 +203,7 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
             f"appsrc name=source is-live=true format=3 do-timestamp=true "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
             "videoconvert ! video/x-raw,format=I420 ! "
-            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=ultrafast key-int-max=30 bframes=0 ! "
+            f"nvv4l2h264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=ultrafast key-int-max=30 bframes=0 ! "
             "rtph264pay name=pay0 pt=96 config-interval=1"
         )
         self.set_launch(pipeline)
