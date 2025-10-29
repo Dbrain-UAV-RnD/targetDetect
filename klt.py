@@ -67,8 +67,8 @@ ROI_MOVE_ALPHA = 1
 MIN_POINTS_FOR_MOVE = 0
 LOCK_INITIAL_FEATURES = True
 
-UDP_HOST = '192.168.10.219'
-UDP_PORT = 5001
+TCP_HOST = '192.168.144.60'
+TCP_PORT = 37260
 
 RTSP_PORT = 8554
 RTSP_MOUNT_POINT = '/video0'
@@ -332,10 +332,10 @@ def tcp_receiver():
         try:
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind((UDP_HOST, UDP_PORT))
+            server_socket.bind((TCP_HOST, TCP_PORT))
             server_socket.listen(1)  # 최대 1개의 대기 연결
             server_socket.settimeout(1.0)  # accept timeout
-            print(f"TCP Server listening on {UDP_HOST}:{UDP_PORT}")
+            print(f"TCP Server listening on {TCP_HOST}:{TCP_PORT}")
             break
         except Exception as e:
             print(f"TCP bind attempt {attempt+1} failed: {e}")
