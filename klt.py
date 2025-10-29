@@ -68,7 +68,7 @@ LOCK_INITIAL_FEATURES = True
 UDP_HOST = '192.168.10.219'
 UDP_PORT = 5001
 
-RTSP_PORT = 544
+RTSP_PORT = 8554
 RTSP_MOUNT_POINT = '/video0'
 BITRATE_KBPS = 6000
 
@@ -198,7 +198,7 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.height = height
         self.fps = fps
         self.bitrate_kbps = bitrate_kbps
-        self.appsrc = None
+        self.appsrc_list = []  # 모든 클라이언트의 appsrc 저장
         self.client_connected = False
         self.frame_count = 0
         self.last_debug_time = time.time()
@@ -207,18 +207,23 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         pipeline = (
             f"appsrc name=source is-live=true format=3 do-timestamp=true "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-            "videoconvert ! video/x-raw ! "
-            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast key-int-max=30 ! "
-            "rtph264pay name=pay0 pt=96"
+            "videoconvert ! video/x-raw,format=I420 ! "
+            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=ultrafast key-int-max=30 bframes=0 ! "
+            "rtph264pay name=pay0 pt=96 config-interval=1"
         )
         self.set_launch(pipeline)
-        self.set_shared(True)
+        self.set_shared(True)  # shared 모드 사용
         
-        print(f"[RTSP] Factory initialized")
+        print(f"[RTSP] Factory initialized (shared=True)")
         print(f"[RTSP] Pipeline: {pipeline}")
         
         # media가 준비되면 appsrc를 가져오기 위한 시그널 연결
         self.connect("media-configure", self.on_media_configure)
+        self.connect("media-constructed", self.on_media_constructed)
+    
+    def on_media_constructed(self, factory, media):
+        """미디어가 생성될 때 호출"""
+        print("[RTSP] on_media_constructed called - Media is being prepared!")
     
     def on_media_configure(self, factory, media):
         """미디어가 설정될 때 appsrc 참조 가져오기"""
@@ -226,39 +231,65 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         element = media.get_element()
         if element:
             print("[RTSP] Got media element")
-            self.appsrc = element.get_by_name("source")
-            if self.appsrc:
+            appsrc = element.get_by_name("source")
+            if appsrc:
+                self.appsrc_list.append(appsrc)
                 self.client_connected = True
                 print("\n" + "="*60)
                 print("[RTSP] ✓✓✓ CLIENT CONNECTED! ✓✓✓")
                 print("[RTSP] Starting video stream...")
                 print(f"[RTSP] Resolution: {self.width}x{self.height} @ {self.fps}fps")
                 print(f"[RTSP] Bitrate: {self.bitrate_kbps} kbps")
+                print(f"[RTSP] Total clients: {len(self.appsrc_list)}")
                 print("="*60 + "\n")
                 
                 # appsrc 속성 설정
-                self.appsrc.set_property('format', Gst.Format.TIME)
-                self.appsrc.set_property('block', False)
+                appsrc.set_property('format', Gst.Format.TIME)
+                appsrc.set_property('block', False)
+                appsrc.set_property('max-bytes', 0)
+                appsrc.set_property('emit-signals', False)
                 print("[RTSP] appsrc properties set")
             else:
                 print("[RTSP] ✗ Failed to get appsrc from element")
         else:
             print("[RTSP] ✗ Failed to get media element")
+    
+    @property
+    def appsrc(self):
+        """첫 번째 appsrc 반환 (호환성 유지)"""
+        return self.appsrc_list[0] if self.appsrc_list else None
+
+def on_client_connected(server, client):
+    """클라이언트 연결 시 호출되는 콜백"""
+    print(f"\n[RTSP] ✓ Client connected from: {client.get_connection().get_ip()}")
 
 def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     """RTSP 서버 설정 및 시작"""
+    print("\n" + "="*60)
+    print("[RTSP] Initializing RTSP Server...")
+    print("="*60)
+    
     server = GstRtspServer.RTSPServer()
     
     # 모든 네트워크 인터페이스에 바인딩 (0.0.0.0)
     server.set_address("0.0.0.0")
+    print(f"[RTSP] Server address: 0.0.0.0 (all interfaces)")
+    
     server.set_service(str(port))
+    print(f"[RTSP] Server port: {port}")
     
     factory = RTSPServerFactory(width, height, fps, bitrate_kbps)
     
     mounts = server.get_mount_points()
     mounts.add_factory(mount_point, factory)
+    print(f"[RTSP] Mount point: {mount_point}")
+    
+    # 클라이언트 연결 시그널 연결
+    server.connect("client-connected", on_client_connected)
+    print("[RTSP] Client connection callback registered")
     
     server.attach(None)
+    print("[RTSP] Server attached to main context")
     
     # 로컬 IP 주소 자동 감지
     local_ip = get_local_ip()
@@ -277,6 +308,7 @@ def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     print("\nWaiting for client connections...")
     print(f"Test with: ffplay -rtsp_transport tcp rtsp://{local_ip if local_ip != 'Unknown' else '192.168.10.219'}:{port}{mount_point}")
     print(f"Or VLC:    rtsp://{local_ip if local_ip != 'Unknown' else '192.168.10.219'}:{port}{mount_point}")
+    print(f"Or GST:    gst-launch-1.0 playbin uri=rtsp://{local_ip if local_ip != 'Unknown' else '192.168.10.219'}:{port}{mount_point}")
     print("=" * 60)
     
     return server, factory
@@ -759,12 +791,21 @@ def main():
                 cv2.putText(display_frame, "RTSP: WAITING", (10, 130),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
-            # RTSP 스트리밍 - factory의 appsrc가 준비되면 프레임 푸시
-            if rtsp_factory.appsrc is not None:
+            # RTSP 스트리밍 - 모든 연결된 클라이언트에게 프레임 푸시
+            if rtsp_factory.appsrc_list:
                 try:
                     buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
                     buf.fill(0, display_frame.tobytes())
-                    ret = rtsp_factory.appsrc.emit("push-buffer", buf)
+                    
+                    # 모든 appsrc에 푸시
+                    for i, appsrc in enumerate(rtsp_factory.appsrc_list):
+                        if appsrc is not None:
+                            ret = appsrc.emit("push-buffer", buf)
+                            
+                            if ret != Gst.FlowReturn.OK:
+                                print(f"[RTSP] ✗ Buffer push failed for client {i}: {ret}")
+                                if ret == Gst.FlowReturn.FLUSHING:
+                                    print(f"[RTSP] Client {i} disconnected")
                     
                     rtsp_factory.frame_count += 1
                     
@@ -777,17 +818,10 @@ def main():
                     # 5초마다 상태 출력
                     now = time.time()
                     if now - rtsp_factory.last_debug_time >= 5.0:
-                        print(f"[RTSP] Streaming OK: {rtsp_factory.frame_count} frames sent")
+                        print(f"[RTSP] Streaming OK: {rtsp_factory.frame_count} frames sent to {len(rtsp_factory.appsrc_list)} client(s)")
                         rtsp_factory.last_debug_time = now
                     
-                    if ret != Gst.FlowReturn.OK:
-                        # 클라이언트 연결 해제 등의 상황
-                        print(f"[RTSP] ✗ Buffer push failed: {ret}")
-                        if ret == Gst.FlowReturn.FLUSHING:
-                            print("[RTSP] Client disconnected or pipeline flushing")
-                        elif ret == Gst.FlowReturn.EOS:
-                            print("[RTSP] End of stream")
-                        rtsp_factory.client_connected = False
+
                 except Exception as e:
                     # 에러 발생 시
                     if frame_counter % (TARGET_FPS * 4) == 0:
@@ -817,4 +851,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
