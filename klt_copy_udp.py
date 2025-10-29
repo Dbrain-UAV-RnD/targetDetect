@@ -1,18 +1,12 @@
 import os
-
-# 환경 변수 설정
-gst_plugin_paths = [
-    '/usr/lib/aarch64-linux-gnu/gstreamer-1.0',
-]
-existing_gst_path = os.environ.get('GST_PLUGIN_PATH', '')
-os.environ['GST_PLUGIN_PATH'] = ':'.join(gst_plugin_paths + [existing_gst_path] if existing_gst_path else gst_plugin_paths)
+os.environ['GST_PLUGIN_PATH'] = os.environ.get('GST_PLUGIN_PATH', '/usr/lib/aarch64-linux-gnu/gstreamer-1.0')
 
 gi_typelib_paths = [
     '/usr/lib/aarch64-linux-gnu/girepository-1.0',
     '/usr/lib/girepository-1.0',
 ]
-existing_gi_path = os.environ.get('GI_TYPELIB_PATH', '')
-os.environ['GI_TYPELIB_PATH'] = ':'.join(gi_typelib_paths + [existing_gi_path] if existing_gi_path else gi_typelib_paths)
+existing_path = os.environ.get('GI_TYPELIB_PATH', '')
+os.environ['GI_TYPELIB_PATH'] = ':'.join(gi_typelib_paths + [existing_path] if existing_path else gi_typelib_paths)
 
 ld_library_paths = [
     '/usr/lib/aarch64-linux-gnu',
@@ -317,7 +311,7 @@ def update_roi_position(roi_rect, target_center, W, H, alpha=ROI_MOVE_ALPHA):
     
     return clamp_roi(new_cx, new_cy, w, h, W, H)
 
-def tcp_receiver():
+def udp_receiver():
     global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center, feature_lock_active
 
     prev_x = prev_y = None
@@ -325,268 +319,165 @@ def tcp_receiver():
     prev_zoom_cmd = None
 
     max_retries, retry_delay = 30, 1.0
-    
-    # TCP 서버 소켓 생성
-    server_socket = None
     for attempt in range(max_retries):
         try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind((UDP_HOST, UDP_PORT))
-            server_socket.listen(1)  # 최대 1개의 대기 연결
-            server_socket.settimeout(1.0)  # accept timeout
-            print(f"TCP Server listening on {UDP_HOST}:{UDP_PORT}")
+            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            udp_socket.settimeout(0.5)
+            udp_socket.bind((UDP_HOST, UDP_PORT))
             break
-        except Exception as e:
-            print(f"TCP bind attempt {attempt+1} failed: {e}")
-            if server_socket:
-                try:
-                    server_socket.close()
-                except:
-                    pass
-                server_socket = None
+        except Exception:
             time.sleep(retry_delay)
     else:
-        print("Failed to create TCP server")
         return
 
-    def process_packet(data):
-        nonlocal prev_x, prev_y, prev_target_selected, prev_zoom_cmd
-        
-        # 최소 패킷 크기 체크: 2(header) + 1 + 2(len) + 2 + 1 + 1(최소 data) + 2(crc) = 11
-        if len(data) < 11:
-            return
-
-        # 헤더 체크 (0x55 0x66으로 가정)
-        if data[0] != 0x55 or data[1] != 0x66:
-            return
-
-        # 3번째 바이트가 1인지 체크
-        if data[2] != 0x01:
-            return
-
-        # 데이터 길이 읽기 (리틀 엔디안)
-        data_length = struct.unpack('<H', data[3:5])[0]
-
-        # 4~5번째 바이트가 0인지 체크
-        if data[5] != 0x00 or data[6] != 0x00:
-            return
-
-        # 전체 패킷 길이 계산: 2 + 1 + 2 + 2 + 1 + data_length + 2
-        expected_length = 10 + data_length
-        if len(data) < expected_length:
-            return
-
-        # 명령 바이트 (0 또는 4~6)
-        cmd_byte = data[7]
-        if cmd_byte not in [0x00, 0x04, 0x05, 0x06]:
-            return
-
-        # 가변 데이터 추출
-        var_data = data[8:8+data_length]
-
-        # CRC 체크
-        crc_start = 8 + data_length
-        if len(data) < crc_start + 2:
-            return
-
-        received_crc = struct.unpack('<H', data[crc_start:crc_start+2])[0]
-        calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
-
-        if received_crc != calculated_crc:
-            return
-
-        # 명령 바이트 해석
-        # 0x00: TCP Heartbeat (가변 1바이트: 0x00 고정)
-        # 0x04: AI Mode (가변 1바이트: 0 또는 1)
-        # 0x05: Zoom Mode (가변 1바이트: -1/0/1)
-        # 0x06: Target Selection (가변 9바이트: 1바이트 선택여부 + 4바이트 x + 4바이트 y)
-        
-        x = y = None
-        is_target = False
-        zoom_cmd = 0x00
-        ai_mode = None
-        
-        if cmd_byte == 0x00:
-            # TCP Heartbeat - 아무 동작 안함
-            if data_length >= 1 and var_data[0] == 0x00:
-                return
-                
-        elif cmd_byte == 0x04:
-            # AI Mode
-            if data_length >= 1:
-                ai_mode = var_data[0]
-                # AI 모드 활성화/비활성화 처리
-                # 여기에 AI 모드 관련 로직 추가 가능
-                
-        elif cmd_byte == 0x05:
-            # Zoom Mode
-            if data_length >= 1:
-                zoom_value = struct.unpack('b', var_data[0:1])[0]  # signed byte
-                if zoom_value == 1:
-                    zoom_cmd = 0x02  # zoom in
-                elif zoom_value == -1:
-                    zoom_cmd = 0x01  # zoom out
-                else:
-                    zoom_cmd = 0x00  # none
-                    
-        elif cmd_byte == 0x06:
-            # Target Selection (9바이트: 1바이트 선택여부 + 2바이트 x1 + 2바이트 y1 + 2바이트 x2 + 2바이트 y2)
-            if data_length >= 9:
-                target_flag = var_data[0]
-                x1 = struct.unpack('<H', var_data[1:3])[0]  # 좌상단 x
-                y1 = struct.unpack('<H', var_data[3:5])[0]  # 좌상단 y
-                x2 = struct.unpack('<H', var_data[5:7])[0]  # 우하단 x
-                y2 = struct.unpack('<H', var_data[7:9])[0]  # 우하단 y
-                
-                # 중심점 계산
-                x = (x1 + x2) // 2
-                y = (y1 + y2) // 2
-                is_target = (target_flag == 0x01)
-
-        # 중복 데이터 필터링 (heartbeat 제외)
-        if cmd_byte != 0x00:
-            if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
-                return
-
-            prev_x, prev_y = x, y
-            prev_target_selected = is_target
-            prev_zoom_cmd = zoom_cmd
-
-        # Target Selection 처리 (cmd_byte == 0x06)
-        if cmd_byte == 0x06 and x is not None and y is not None:
-            orig_x, orig_y = x, y
-            try:
-                orig_x, orig_y = display_to_original_coord(x, y)
-            except Exception:
-                pass
-
-            if is_target:
-                latest_point = (orig_x, orig_y)
-                new_point_received = True
-                target_selected = True
-                # 타겟 선택 시 줌 센터 업데이트
-                if zoom_center is None:
-                    zoom_center = (orig_x, orig_y)
-            else:
-                # 타겟 선택 해제
-                target_selected = False
-                tracking = False
-                feature_lock_active = False
-
-        # Zoom 명령 처리 (cmd_byte == 0x05)
-        if cmd_byte == 0x05:
-            if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
-                zoom_command = 'zoom_in'
-                # zoom_center가 없으면 화면 중앙으로
-                if zoom_center is None:
-                    zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
-            elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
-                zoom_command = 'zoom_out'
-                if zoom_center is None:
-                    zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
-            elif zoom_cmd == 0x00:
-                zoom_command = None
-
-    # TCP 서버 메인 루프
     try:
         while True:
-            client_socket = None
             try:
-                # 클라이언트 연결 대기
-                print("Waiting for client connection...")
-                try:
-                    client_socket, client_addr = server_socket.accept()
-                except socket.timeout:
+                data, _ = udp_socket.recvfrom(64)  # 최대 패킷 크기를 충분히 크게
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+            # 최소 패킷 크기 체크: 2(header) + 1 + 2(len) + 2 + 1 + 1(최소 data) + 2(crc) = 11
+            if len(data) < 11:
+                continue
+
+            # 헤더 체크 (0x55 0x66으로 가정)
+            if data[0] != 0x55 or data[1] != 0x66:
+                continue
+
+            # 3번째 바이트가 1인지 체크
+            if data[2] != 0x01:
+                continue
+
+            # 데이터 길이 읽기 (리틀 엔디안)
+            data_length = struct.unpack('<H', data[3:5])[0]
+
+            # 4~5번째 바이트가 0인지 체크
+            if data[5] != 0x00 or data[6] != 0x00:
+                continue
+
+            # 전체 패킷 길이 계산: 2 + 1 + 2 + 2 + 1 + data_length + 2
+            expected_length = 10 + data_length
+            if len(data) < expected_length:
+                continue
+
+            # 명령 바이트 (0 또는 4~6)
+            cmd_byte = data[7]
+            if cmd_byte not in [0x00, 0x04, 0x05, 0x06]:
+                continue
+
+            # 가변 데이터 추출
+            var_data = data[8:8+data_length]
+
+            # CRC 체크
+            crc_start = 8 + data_length
+            if len(data) < crc_start + 2:
+                continue
+
+            received_crc = struct.unpack('<H', data[crc_start:crc_start+2])[0]
+            calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
+
+            if received_crc != calculated_crc:
+                continue
+
+            # 명령 바이트 해석
+            # 0x00: TCP Heartbeat (가변 1바이트: 0x00 고정)
+            # 0x04: AI Mode (가변 1바이트: 0 또는 1)
+            # 0x05: Zoom Mode (가변 1바이트: -1/0/1)
+            # 0x06: Target Selection (가변 9바이트: 1바이트 선택여부 + 4바이트 x + 4바이트 y)
+            
+            x = y = None
+            is_target = False
+            zoom_cmd = 0x00
+            ai_mode = None
+            
+            if cmd_byte == 0x00:
+                # TCP Heartbeat - 아무 동작 안함
+                if data_length >= 1 and var_data[0] == 0x00:
                     continue
-                
-                client_socket.settimeout(0.5)  # recv timeout
-                print(f"Client connected from {client_addr}")
-                
-                # 클라이언트와 통신
-                buffer = b''
-                while True:
-                    try:
-                        chunk = client_socket.recv(1024)
-                        if not chunk:
-                            # 연결 종료
-                            print("Client disconnected")
-                            break
+                    
+            elif cmd_byte == 0x04:
+                # AI Mode
+                if data_length >= 1:
+                    ai_mode = var_data[0]
+                    # AI 모드 활성화/비활성화 처리
+                    # 여기에 AI 모드 관련 로직 추가 가능
+                    
+            elif cmd_byte == 0x05:
+                # Zoom Mode
+                if data_length >= 1:
+                    zoom_value = struct.unpack('b', var_data[0:1])[0]  # signed byte
+                    if zoom_value == 1:
+                        zoom_cmd = 0x02  # zoom in
+                    elif zoom_value == -1:
+                        zoom_cmd = 0x01  # zoom out
+                    else:
+                        zoom_cmd = 0x00  # none
                         
-                        buffer += chunk
-                        
-                        # 패킷 처리
-                        while len(buffer) >= 11:  # 최소 패킷 크기
-                            # 헤더 찾기
-                            header_idx = -1
-                            for i in range(len(buffer) - 1):
-                                if buffer[i] == 0x55 and buffer[i+1] == 0x66:
-                                    header_idx = i
-                                    break
-                            
-                            if header_idx == -1:
-                                # 헤더를 찾지 못하면 버퍼의 마지막 바이트만 남기고 제거
-                                buffer = buffer[-1:] if len(buffer) > 0 else b''
-                                break
-                            
-                            # 헤더 이전 데이터 제거
-                            if header_idx > 0:
-                                buffer = buffer[header_idx:]
-                            
-                            # 패킷 길이 확인
-                            if len(buffer) < 11:
-                                break
-                            
-                            # 패킷 파싱
-                            data = buffer
-                            
-                            # 처리 가능한지 확인
-                            if data[2] != 0x01:
-                                buffer = buffer[2:]  # 헤더 이후로 이동
-                                continue
-                            
-                            try:
-                                data_length = struct.unpack('<H', data[3:5])[0]
-                            except:
-                                buffer = buffer[2:]
-                                continue
-                            
-                            if len(data) < 7 or data[5] != 0x00 or data[6] != 0x00:
-                                buffer = buffer[2:]
-                                continue
-                            
-                            expected_length = 10 + data_length
-                            if len(buffer) < expected_length:
-                                break  # 더 많은 데이터 필요
-                            
-                            # 완전한 패킷 추출
-                            packet = buffer[:expected_length]
-                            buffer = buffer[expected_length:]
-                            
-                            # 패킷 처리
-                            process_packet(packet)
-                            
-                    except socket.timeout:
-                        continue
-                    except Exception as e:
-                        print(f"Receive error: {e}")
-                        break
-                        
-            except Exception as e:
-                print(f"Connection error: {e}")
-            finally:
-                if client_socket:
-                    try:
-                        client_socket.close()
-                    except:
-                        pass
-                time.sleep(0.1)  # 재연결 전 짧은 대기
-                time.sleep(0.1)  # 재연결 전 짧은 대기
-                
+            elif cmd_byte == 0x06:
+                # Target Selection (9바이트: 1바이트 선택여부 + 2바이트 x1 + 2바이트 y1 + 2바이트 x2 + 2바이트 y2)
+                if data_length >= 9:
+                    target_flag = var_data[0]
+                    x1 = struct.unpack('<H', var_data[1:3])[0]  # 좌상단 x
+                    y1 = struct.unpack('<H', var_data[3:5])[0]  # 좌상단 y
+                    x2 = struct.unpack('<H', var_data[5:7])[0]  # 우하단 x
+                    y2 = struct.unpack('<H', var_data[7:9])[0]  # 우하단 y
+                    
+                    # 중심점 계산
+                    x = (x1 + x2) // 2
+                    y = (y1 + y2) // 2
+                    is_target = (target_flag == 0x01)
+
+            # 중복 데이터 필터링 (heartbeat 제외)
+            if cmd_byte != 0x00:
+                if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
+                    continue
+
+                prev_x, prev_y = x, y
+                prev_target_selected = is_target
+                prev_zoom_cmd = zoom_cmd
+
+            # Target Selection 처리 (cmd_byte == 0x06)
+            if cmd_byte == 0x06 and x is not None and y is not None:
+                orig_x, orig_y = x, y
+                try:
+                    orig_x, orig_y = display_to_original_coord(x, y)
+                except Exception:
+                    pass
+
+                if is_target:
+                    latest_point = (orig_x, orig_y)
+                    new_point_received = True
+                    target_selected = True
+                    # 타겟 선택 시 줌 센터 업데이트
+                    if zoom_center is None:
+                        zoom_center = (orig_x, orig_y)
+                else:
+                    # 타겟 선택 해제
+                    target_selected = False
+                    tracking = False
+                    feature_lock_active = False
+
+            # Zoom 명령 처리 (cmd_byte == 0x05)
+            if cmd_byte == 0x05:
+                if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
+                    zoom_command = 'zoom_in'
+                    # zoom_center가 없으면 화면 중앙으로
+                    if zoom_center is None:
+                        zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
+                elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
+                    zoom_command = 'zoom_out'
+                    if zoom_center is None:
+                        zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
+                elif zoom_cmd == 0x00:
+                    zoom_command = None
+
     finally:
         try:
-            if server_socket:
-                server_socket.close()
+            udp_socket.close()
         except Exception:
             pass
 
@@ -636,8 +527,8 @@ def main():
         FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, BITRATE_KBPS
     )
 
-    tcp_thread = threading.Thread(target=tcp_receiver, daemon=True)
-    tcp_thread.start()
+    udp_thread = threading.Thread(target=udp_receiver, daemon=True)
+    udp_thread.start()
 
     cap_pipelines = gstreamer_camera_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS)
     cap = None
