@@ -91,9 +91,10 @@ prev_frame = None
 tracking_points = None
 roi_rect = None
 roi_center = None
-prev_roi_center = None  # 이전 ROI 중심점 저장용
 adaptive_mode = True
 feature_lock_active = False
+prev_center_x = None
+prev_center_y = None
 
 serial_port = None
 
@@ -138,6 +139,43 @@ def crc16_modbus(init_crc, dat, len):
         crc[1] = tmp>>8
     
     return (crc[0]|crc[1]<<8)
+
+class CoordinateConverter:
+    """좌표 변환을 위한 헬퍼 클래스 - 함수 재정의 방지"""
+    def __init__(self):
+        self.zoom_applied = False
+        self.zoom_level = 1.0
+        self.zoom_x1 = 0
+        self.zoom_y1 = 0
+        self.frame_width = 0
+        self.frame_height = 0
+    
+    def update(self, zoom_applied, zoom_level, zoom_x1, zoom_y1, frame_width, frame_height):
+        """줌 상태 업데이트"""
+        self.zoom_applied = zoom_applied
+        self.zoom_level = zoom_level
+        self.zoom_x1 = zoom_x1
+        self.zoom_y1 = zoom_y1
+        self.frame_width = frame_width
+        self.frame_height = frame_height
+    
+    def original_to_display(self, ox, oy):
+        """원본 좌표를 디스플레이 좌표로 변환"""
+        if not self.zoom_applied or self.zoom_level <= 1.0:
+            return int(ox), int(oy)
+        rel_x = ox - self.zoom_x1
+        rel_y = oy - self.zoom_y1
+        return int(rel_x * self.zoom_level), int(rel_y * self.zoom_level)
+    
+    def display_to_original(self, dx, dy):
+        """디스플레이 좌표를 원본 좌표로 변환"""
+        if not self.zoom_applied or self.zoom_level <= 1.0:
+            return int(dx), int(dy)
+        rel_x = dx / self.zoom_level
+        rel_y = dy / self.zoom_level
+        ox = int(rel_x + self.zoom_x1)
+        oy = int(rel_y + self.zoom_y1)
+        return max(0, min(ox, self.frame_width - 1)), max(0, min(oy, self.frame_height - 1))
 
 def display_to_original_coord(x, y):
     return int(x), int(y)
@@ -320,7 +358,6 @@ def update_roi_position(roi_rect, target_center, W, H, alpha=ROI_MOVE_ALPHA):
 
 def tcp_receiver():
     global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center, feature_lock_active
-    global prev_roi_center
 
     prev_x = prev_y = None
     prev_target_selected = None
@@ -477,8 +514,6 @@ def tcp_receiver():
                 target_selected = False
                 tracking = False
                 feature_lock_active = False
-                prev_roi_center = None  # 이전 중심점 초기화
-                print("[Tracking] 타겟 선택 해제 - 이전 중심점 초기화")
 
         # Zoom 명령 처리 (cmd_byte == 0x05)
         if cmd_byte == 0x05:
@@ -598,7 +633,7 @@ def tcp_receiver():
 
 def process_new_coordinate(gray_frame):
     global latest_point, new_point_received, tracking, prev_frame, tracking_points, roi_rect, roi_center
-    global feature_lock_active, prev_roi_center
+    global feature_lock_active
 
     if not new_point_received:
         return
@@ -609,17 +644,6 @@ def process_new_coordinate(gray_frame):
     if not (0 <= x < gray_frame.shape[1] and 0 <= y < gray_frame.shape[0]):
         return
 
-    # 새로운 중심점이 이전 중심점과 같으면 무시
-    if prev_roi_center is not None:
-        prev_x, prev_y = prev_roi_center
-        if x == prev_x and y == prev_y:
-            print(f"[Tracking] 동일한 중심점 무시: ({x}, {y})")
-            return
-    
-    # 새로운 중심점으로 업데이트
-    prev_roi_center = (x, y)
-    print(f"[Tracking] 새로운 타겟 중심점: ({x}, {y})")
-    
     H, W = gray_frame.shape[:2]
     roi_rect = clamp_roi(x, y, ROI_SIZE, ROI_SIZE, W, H)
     roi_center = (x, y)
@@ -630,14 +654,13 @@ def process_new_coordinate(gray_frame):
         prev_frame = gray_frame
         tracking = True
         feature_lock_active = LOCK_INITIAL_FEATURES
-        print(f"[Tracking] 추적 시작 - 특징점 개수: {len(tracking_points)}")
     else:
         feature_lock_active = False
-        print(f"[Tracking] 특징점을 찾을 수 없음")
 
 def main():
     global serial_port, tracking, prev_frame, tracking_points, roi_rect, roi_center
     global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord, feature_lock_active
+    global prev_center_x, prev_center_y
 
     try:
         Gst.init(None)
@@ -711,6 +734,9 @@ def main():
     last_serial_time = 0.0
     serial_interval = 1.0 / float(TARGET_FPS)
     frame_counter = 0
+    
+    # 좌표 변환 헬퍼 생성 (함수 재정의 방지)
+    coord_converter = CoordinateConverter()
 
     try:
         while True:
@@ -836,50 +862,41 @@ def main():
                 display_frame = cv2.resize(roi, (w, h))
                 zoom_applied = True
 
-            def original_to_display_coord(ox, oy):
-                if not zoom_applied or zoom_level <= 1.0:
-                    return int(ox), int(oy)
-                rel_x = ox - zoom_x1
-                rel_y = oy - zoom_y1
-                return int(rel_x * zoom_level), int(rel_y * zoom_level)
-
-            def local_display_to_original_coord(dx, dy):
-                if not zoom_applied or zoom_level <= 1.0:
-                    return int(dx), int(dy)
-                rel_x = dx / zoom_level
-                rel_y = dy / zoom_level
-                ox = int(rel_x + zoom_x1)
-                oy = int(rel_y + zoom_y1)
-                h, w = frame.shape[:2]
-                return max(0, min(ox, w - 1)), max(0, min(oy, h - 1))
-
-            display_to_original_coord = lambda dx, dy: local_display_to_original_coord(dx, dy)
+            # 좌표 변환 상태 업데이트 (함수 재정의 대신 클래스 사용)
+            h, w = frame.shape[:2]
+            coord_converter.update(zoom_applied, zoom_level, zoom_x1, zoom_y1, w, h)
 
             if tracking and tracking_points is not None:
                 for pt in tracking_points:
                     arr = pt.ravel().astype(int)
                     x, y = int(arr[0]), int(arr[1])
-                    dx, dy = original_to_display_coord(x, y)
+                    dx, dy = coord_converter.original_to_display(x, y)
                     cv2.circle(display_frame, (dx, dy), 3, (0, 255, 0), -1)
 
-                cx_d, cy_d = original_to_display_coord(center_x, center_y)
+                cx_d, cy_d = coord_converter.original_to_display(center_x, center_y)
                 cv2.circle(display_frame, (cx_d, cy_d), 5, (0, 0, 255), -1)
 
+                # 중심점 변경 감지: 이전 값과 다를 때만 시리얼 전송
+                center_changed = (prev_center_x != center_x or prev_center_y != center_y)
+                
                 now = time.time()
-                if now - last_serial_time >= serial_interval:
+                if center_changed and (now - last_serial_time >= serial_interval):
                     fh, fw = frame.shape[:2]
                     send_data_to_serial(center_x, center_y, tracking, fw, fh)
                     last_serial_time = now
+                    # 이전 중심점 업데이트
+                    prev_center_x = center_x
+                    prev_center_y = center_y
 
             if roi_rect is not None:
                 x, y, w, h = roi_rect
-                dx1, dy1 = original_to_display_coord(x, y)
-                dx2, dy2 = original_to_display_coord(x+w, y+h)
+                dx1, dy1 = coord_converter.original_to_display(x, y)
+                dx2, dy2 = coord_converter.original_to_display(x+w, y+h)
                 color = (0, 255, 255) if adaptive_mode else (255, 128, 0)
                 cv2.rectangle(display_frame, (dx1, dy1), (dx2, dy2), color, 2)
                 
                 cx, cy = x + w//2, y + h//2
-                dcx, dcy = original_to_display_coord(cx, cy)
+                dcx, dcy = coord_converter.original_to_display(cx, cy)
                 cv2.drawMarker(display_frame, (dcx, dcy), color, cv2.MARKER_CROSS, 10, 1)
 
             status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
