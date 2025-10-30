@@ -415,9 +415,9 @@ def tcp_receiver():
         received_crc = struct.unpack('<H', data[crc_start:crc_start+2])[0]
         calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
 
-        if received_crc != calculated_crc:
-            print("[CRC Error] Packet CRC mismatch")
-            return
+        # if received_crc != calculated_crc:
+        #     print("[CRC Error] Packet CRC mismatch")
+        #     return
 
         # 명령 바이트 해석
         # 0x00: TCP Heartbeat
