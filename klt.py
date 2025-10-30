@@ -352,6 +352,8 @@ def tcp_receiver():
 
     def process_packet(data):
         nonlocal prev_x, prev_y, prev_target_selected, prev_zoom_cmd
+        ###
+        print(f"[Packet] Length: {len(data)}, Hex: {' '.join(f'{b:02X}' for b in data)}")
         
         # 최소 패킷 크기 체크: 2(header) + 1 + 2(len) + 2 + 1 + 1(최소 data) + 2(crc) = 11
         if len(data) < 11:
