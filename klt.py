@@ -73,7 +73,7 @@ TCP_PORT = 37260
 RTSP_PORT = 8554
 RTSP_MOUNT_POINT = '/video0'
 BITRATE_KBPS = 6000
-##
+
 SERIAL_CANDIDATES = [
     '/dev/serial0',
     '/dev/ttyAMA10'
@@ -93,8 +93,6 @@ roi_rect = None
 roi_center = None
 adaptive_mode = True
 feature_lock_active = False
-prev_center_x = None
-prev_center_y = None
 
 serial_port = None
 
@@ -132,55 +130,21 @@ crc16_table = [0x0000, 0xc0c1, 0xc181, 0x0140, 0xc301, 0x03c0, 0x0280, 0xc241,
     0x8201, 0x42c0, 0x4380, 0x8341, 0x4100, 0x81c1, 0x8081, 0x4040]
 
 def crc16_modbus(init_crc, dat, len):
+    """CRC16 Modbus 체크섬 계산"""
     crc = [init_crc >> 8, init_crc & 0xFF]    
     for b in dat:
         tmp = crc16_table[crc[0] ^ b]
         crc[0] = (tmp & 0xFF) ^ crc[1]
-        crc[1] = tmp>>8
+        crc[1] = tmp >> 8
     
-    return (crc[0]|crc[1]<<8)
-
-class CoordinateConverter:
-    """좌표 변환을 위한 헬퍼 클래스 - 함수 재정의 방지"""
-    def __init__(self):
-        self.zoom_applied = False
-        self.zoom_level = 1.0
-        self.zoom_x1 = 0
-        self.zoom_y1 = 0
-        self.frame_width = 0
-        self.frame_height = 0
-    
-    def update(self, zoom_applied, zoom_level, zoom_x1, zoom_y1, frame_width, frame_height):
-        """줌 상태 업데이트"""
-        self.zoom_applied = zoom_applied
-        self.zoom_level = zoom_level
-        self.zoom_x1 = zoom_x1
-        self.zoom_y1 = zoom_y1
-        self.frame_width = frame_width
-        self.frame_height = frame_height
-    
-    def original_to_display(self, ox, oy):
-        """원본 좌표를 디스플레이 좌표로 변환"""
-        if not self.zoom_applied or self.zoom_level <= 1.0:
-            return int(ox), int(oy)
-        rel_x = ox - self.zoom_x1
-        rel_y = oy - self.zoom_y1
-        return int(rel_x * self.zoom_level), int(rel_y * self.zoom_level)
-    
-    def display_to_original(self, dx, dy):
-        """디스플레이 좌표를 원본 좌표로 변환"""
-        if not self.zoom_applied or self.zoom_level <= 1.0:
-            return int(dx), int(dy)
-        rel_x = dx / self.zoom_level
-        rel_y = dy / self.zoom_level
-        ox = int(rel_x + self.zoom_x1)
-        oy = int(rel_y + self.zoom_y1)
-        return max(0, min(ox, self.frame_width - 1)), max(0, min(oy, self.frame_height - 1))
+    return (crc[0] | crc[1] << 8)
 
 def display_to_original_coord(x, y):
+    """디스플레이 좌표를 원본 좌표로 변환"""
     return int(x), int(y)
 
 def setup_serial():
+    """시리얼 포트 설정"""
     for dev in SERIAL_CANDIDATES:
         try:
             ser = serial.Serial(
@@ -197,11 +161,13 @@ def setup_serial():
     return None
 
 def normalize_for_serial(px, py, width, height):
+    """시리얼 전송을 위한 좌표 정규화"""
     xn = int((-1.0 + (px * (2.0 / max(1, width)))) * 1000.0)
-    yn = int(( 1.0 - (py * (2.0 / max(1, height)))) * 1000.0)
+    yn = int((1.0 - (py * (2.0 / max(1, height)))) * 1000.0)
     return xn, yn
 
 def send_data_to_serial(px, py, is_tracking, frame_w, frame_h):
+    """시리얼로 트래킹 데이터 전송"""
     global serial_port
     if serial_port is None or not serial_port.is_open:
         return
@@ -225,6 +191,7 @@ def send_data_to_serial(px, py, is_tracking, frame_w, frame_h):
             pass
 
 def gstreamer_camera_pipeline(width, height, fps):
+    """GStreamer 카메라 파이프라인 설정"""
     pipelines = [
         f"v4l2src device=/dev/video0 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false",
         f"v4l2src device=/dev/video1 ! video/x-raw,width={width},height={height},framerate={fps}/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false",
@@ -233,6 +200,7 @@ def gstreamer_camera_pipeline(width, height, fps):
     return pipelines
 
 class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
+    """RTSP 스트리밍 서버 팩토리"""
     def __init__(self, width, height, fps, bitrate_kbps):
         super().__init__()
         self.width = width
@@ -285,10 +253,9 @@ def on_client_connected(server, client):
     pass
 
 def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
+    """RTSP 서버 설정"""
     server = GstRtspServer.RTSPServer()
-
     server.set_address("0.0.0.0")
-
     server.set_service(str(port))
 
     factory = RTSPServerFactory(width, height, fps, bitrate_kbps)
@@ -297,7 +264,6 @@ def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     mounts.add_factory(mount_point, factory)
 
     server.connect("client-connected", on_client_connected)
-
     server.attach(None)
 
     local_ip = get_local_ip()
@@ -305,6 +271,7 @@ def setup_rtsp_server(port, mount_point, width, height, fps, bitrate_kbps):
     return server, factory
 
 def clamp_roi(cx, cy, w, h, W, H):
+    """ROI(관심 영역)를 프레임 경계 내로 제한"""
     x = int(cx - w // 2)
     y = int(cy - h // 2)
     x = max(0, min(x, W - w))
@@ -312,6 +279,7 @@ def clamp_roi(cx, cy, w, h, W, H):
     return x, y, w, h
 
 def detect_points_in_roi(gray, rect):
+    """ROI 영역에서 특징점 검출"""
     x, y, w, h = rect
     roi = gray[y:y+h, x:x+w]
     if roi.size == 0:
@@ -334,6 +302,7 @@ def detect_points_in_roi(gray, rect):
     return pts + offset
 
 def in_roi(pts, rect):
+    """점들이 ROI 내부에 있는지 확인"""
     if pts is None or len(pts) == 0:
         return np.array([], dtype=bool)
     x, y, w, h = rect
@@ -342,11 +311,13 @@ def in_roi(pts, rect):
     return (xs >= x) & (xs < x + w) & (ys >= y) & (ys < y + h)
 
 def calculate_centroid(pts):
+    """점들의 중심점(무게중심) 계산"""
     if pts is None or len(pts) == 0:
         return None
     return np.mean(pts.reshape(-1, 2), axis=0)
 
 def update_roi_position(roi_rect, target_center, W, H, alpha=ROI_MOVE_ALPHA):
+    """ROI 위치를 타겟 중심을 향해 업데이트"""
     x, y, w, h = roi_rect
     current_cx = x + w // 2
     current_cy = y + h // 2
@@ -357,6 +328,11 @@ def update_roi_position(roi_rect, target_center, W, H, alpha=ROI_MOVE_ALPHA):
     return clamp_roi(new_cx, new_cy, w, h, W, H)
 
 def tcp_receiver():
+    """
+    TCP 서버로 좌표 데이터를 수신하는 스레드
+    - 4개의 좌표값 (x1, y1, x2, y2)을 받아서 중심점을 계산
+    - 계산된 중심점으로 트래킹 초기화
+    """
     global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center, feature_lock_active
 
     prev_x = prev_y = None
@@ -390,35 +366,40 @@ def tcp_receiver():
         return
 
     def process_packet(data):
+        """
+        TCP 패킷 처리 함수
+        - 헤더, CRC 검증 후 명령 처리
+        - 0x06 명령: 4개 좌표값 (x1,y1,x2,y2) 수신 → 중심점 계산
+        """
         nonlocal prev_x, prev_y, prev_target_selected, prev_zoom_cmd
-        ###
+        
         print(f"[Packet] Length: {len(data)}, Hex: {' '.join(f'{b:02X}' for b in data)}")
         
-        # 최소 패킷 크기 체크: 2(header) + 1 + 2(len) + 2 + 1 + 1(최소 data) + 2(crc) = 11
+        # 최소 패킷 크기 체크
         if len(data) < 11:
             return
 
-        # 헤더 체크 (0x55 0x66으로 가정)
+        # 헤더 체크 (0x55 0x66)
         if data[0] != 0x55 or data[1] != 0x66:
             return
 
-        # 3번째 바이트가 1인지 체크
+        # 3번째 바이트 체크
         if data[2] != 0x01:
             return
 
         # 데이터 길이 읽기 (리틀 엔디안)
         data_length = struct.unpack('<H', data[3:5])[0]
 
-        # 4~5번째 바이트가 0인지 체크
+        # 4~5번째 바이트 체크
         if data[5] != 0x00 or data[6] != 0x00:
             return
 
-        # 전체 패킷 길이 계산: 2 + 1 + 2 + 2 + 1 + data_length + 2
+        # 전체 패킷 길이 검증
         expected_length = 10 + data_length
         if len(data) < expected_length:
             return
 
-        # 명령 바이트 (0 또는 4~6)
+        # 명령 바이트 체크
         cmd_byte = data[7]
         if cmd_byte not in [0x00, 0x04, 0x05, 0x06]:
             return
@@ -426,7 +407,7 @@ def tcp_receiver():
         # 가변 데이터 추출
         var_data = data[8:8+data_length]
 
-        # CRC 체크
+        # CRC 검증
         crc_start = 8 + data_length
         if len(data) < crc_start + 2:
             return
@@ -435,13 +416,14 @@ def tcp_receiver():
         calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
 
         if received_crc != calculated_crc:
+            print("[CRC Error] Packet CRC mismatch")
             return
 
         # 명령 바이트 해석
-        # 0x00: TCP Heartbeat (가변 1바이트: 0x00 고정)
-        # 0x04: AI Mode (가변 1바이트: 0 또는 1)
-        # 0x05: Zoom Mode (가변 1바이트: -1/0/1)
-        # 0x06: Target Selection (가변 9바이트: 1바이트 선택여부 + 4바이트 x + 4바이트 y)
+        # 0x00: TCP Heartbeat
+        # 0x04: AI Mode
+        # 0x05: Zoom Mode
+        # 0x06: Target Selection - 4개 좌표값 수신
         
         x = y = None
         is_target = False
@@ -449,7 +431,7 @@ def tcp_receiver():
         ai_mode = None
         
         if cmd_byte == 0x00:
-            # TCP Heartbeat - 아무 동작 안함
+            # TCP Heartbeat
             if data_length >= 1 and var_data[0] == 0x00:
                 return
                 
@@ -457,8 +439,6 @@ def tcp_receiver():
             # AI Mode
             if data_length >= 1:
                 ai_mode = var_data[0]
-                # AI 모드 활성화/비활성화 처리
-                # 여기에 AI 모드 관련 로직 추가 가능
                 
         elif cmd_byte == 0x05:
             # Zoom Mode
@@ -472,18 +452,25 @@ def tcp_receiver():
                     zoom_cmd = 0x00  # none
                     
         elif cmd_byte == 0x06:
-            # Target Selection (9바이트: 1바이트 선택여부 + 2바이트 x1 + 2바이트 y1 + 2바이트 x2 + 2바이트 y2)
+            # ===== 핵심: 4개 좌표값 수신 및 중심점 계산 =====
+            # 패킷 구조: 1바이트(선택 플래그) + 2바이트(x1) + 2바이트(y1) + 2바이트(x2) + 2바이트(y2)
             if data_length >= 9:
                 target_flag = var_data[0]
-                x1 = struct.unpack('<H', var_data[1:3])[0]  # 좌상단 x
-                y1 = struct.unpack('<H', var_data[3:5])[0]  # 좌상단 y
-                x2 = struct.unpack('<H', var_data[5:7])[0]  # 우하단 x
-                y2 = struct.unpack('<H', var_data[7:9])[0]  # 우하단 y
+                # 좌상단 좌표
+                x1 = struct.unpack('<H', var_data[1:3])[0]
+                y1 = struct.unpack('<H', var_data[3:5])[0]
+                # 우하단 좌표
+                x2 = struct.unpack('<H', var_data[5:7])[0]
+                y2 = struct.unpack('<H', var_data[7:9])[0]
                 
-                # 중심점 계산
+                # ===== 중심점 계산 =====
+                # 정수 나눗셈 사용 (원본과 동일)
                 x = (x1 + x2) // 2
                 y = (y1 + y2) // 2
+                
                 is_target = (target_flag == 0x01)
+                
+                print(f"[Target] Rect: ({x1},{y1})-({x2},{y2}) → Center: ({x},{y}), Selected: {is_target}")
 
         # 중복 데이터 필터링 (heartbeat 제외)
         if cmd_byte != 0x00:
@@ -494,7 +481,7 @@ def tcp_receiver():
             prev_target_selected = is_target
             prev_zoom_cmd = zoom_cmd
 
-        # Target Selection 처리 (cmd_byte == 0x06)
+        # ===== Target Selection 처리 =====
         if cmd_byte == 0x06 and x is not None and y is not None:
             orig_x, orig_y = x, y
             try:
@@ -503,23 +490,25 @@ def tcp_receiver():
                 pass
 
             if is_target:
+                # ===== 중심점을 latest_point에 저장 =====
                 latest_point = (orig_x, orig_y)
                 new_point_received = True
                 target_selected = True
                 # 타겟 선택 시 줌 센터 업데이트
                 if zoom_center is None:
                     zoom_center = (orig_x, orig_y)
+                print(f"[Tracking Start] Center point set to: ({orig_x}, {orig_y})")
             else:
                 # 타겟 선택 해제
                 target_selected = False
                 tracking = False
                 feature_lock_active = False
+                print("[Tracking Stop] Target deselected")
 
-        # Zoom 명령 처리 (cmd_byte == 0x05)
+        # Zoom 명령 처리
         if cmd_byte == 0x05:
             if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
                 zoom_command = 'zoom_in'
-                # zoom_center가 없으면 화면 중앙으로
                 if zoom_center is None:
                     zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
             elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
@@ -541,7 +530,7 @@ def tcp_receiver():
                 except socket.timeout:
                     continue
                 
-                client_socket.settimeout(0.5)  # recv timeout
+                client_socket.settimeout(0.5)
                 print(f"Client connected from {client_addr}")
                 
                 # 클라이언트와 통신
@@ -550,7 +539,6 @@ def tcp_receiver():
                     try:
                         chunk = client_socket.recv(1024)
                         if not chunk:
-                            # 연결 종료
                             print("Client disconnected")
                             break
                         
@@ -558,7 +546,7 @@ def tcp_receiver():
                         
                         # 패킷 처리
                         while len(buffer) >= 11:  # 최소 패킷 크기
-                            # 헤더 찾기
+                            # 헤더 찾기 (0x55 0x66)
                             header_idx = -1
                             for i in range(len(buffer) - 1):
                                 if buffer[i] == 0x55 and buffer[i+1] == 0x66:
@@ -566,7 +554,7 @@ def tcp_receiver():
                                     break
                             
                             if header_idx == -1:
-                                # 헤더를 찾지 못하면 버퍼의 마지막 바이트만 남기고 제거
+                                # 헤더를 찾지 못하면 버퍼 초기화
                                 buffer = buffer[-1:] if len(buffer) > 0 else b''
                                 break
                             
@@ -578,21 +566,18 @@ def tcp_receiver():
                             if len(buffer) < 11:
                                 break
                             
-                            # 패킷 파싱
-                            data = buffer
-                            
-                            # 처리 가능한지 확인
-                            if data[2] != 0x01:
-                                buffer = buffer[2:]  # 헤더 이후로 이동
+                            # 패킷 파싱 검증
+                            if buffer[2] != 0x01:
+                                buffer = buffer[2:]
                                 continue
                             
                             try:
-                                data_length = struct.unpack('<H', data[3:5])[0]
+                                data_length = struct.unpack('<H', buffer[3:5])[0]
                             except:
                                 buffer = buffer[2:]
                                 continue
                             
-                            if len(data) < 7 or data[5] != 0x00 or data[6] != 0x00:
+                            if len(buffer) < 7 or buffer[5] != 0x00 or buffer[6] != 0x00:
                                 buffer = buffer[2:]
                                 continue
                             
@@ -621,8 +606,7 @@ def tcp_receiver():
                         client_socket.close()
                     except:
                         pass
-                time.sleep(0.1)  # 재연결 전 짧은 대기
-                time.sleep(0.1)  # 재연결 전 짧은 대기
+                time.sleep(0.1)
                 
     finally:
         try:
@@ -632,6 +616,12 @@ def tcp_receiver():
             pass
 
 def process_new_coordinate(gray_frame):
+    """
+    새로운 좌표로 트래킹 초기화
+    - TCP로 받은 중심점 좌표로 ROI 설정
+    - ROI 영역에서 특징점 검출
+    - 트래킹 시작
+    """
     global latest_point, new_point_received, tracking, prev_frame, tracking_points, roi_rect, roi_center
     global feature_lock_active
 
@@ -641,30 +631,40 @@ def process_new_coordinate(gray_frame):
     new_point_received = False
     x, y = latest_point
 
+    # 좌표 유효성 검사
     if not (0 <= x < gray_frame.shape[1] and 0 <= y < gray_frame.shape[0]):
+        print(f"[Error] Invalid coordinates: ({x}, {y})")
         return
 
     H, W = gray_frame.shape[:2]
+    
+    # ===== ROI(관심 영역) 설정 =====
+    # 중심점을 기준으로 ROI_SIZE 크기의 박스 생성
     roi_rect = clamp_roi(x, y, ROI_SIZE, ROI_SIZE, W, H)
     roi_center = (x, y)
     
+    # ===== ROI 영역에서 특징점 검출 =====
     tracking_points = detect_points_in_roi(gray_frame, roi_rect)
     
     if tracking_points is not None and len(tracking_points) > 0:
+        # ===== 트래킹 시작 =====
         prev_frame = gray_frame
         tracking = True
         feature_lock_active = LOCK_INITIAL_FEATURES
+        print(f"[Tracking Init] ROI: {roi_rect}, Points: {len(tracking_points)}")
     else:
         feature_lock_active = False
+        print("[Warning] No feature points detected in ROI")
 
 def main():
+    """메인 함수 - 카메라, RTSP, TCP 서버 초기화 및 트래킹 루프"""
     global serial_port, tracking, prev_frame, tracking_points, roi_rect, roi_center
     global zoom_level, zoom_command, zoom_center, target_selected, display_to_original_coord, feature_lock_active
-    global prev_center_x, prev_center_y
 
     try:
         Gst.init(None)
     except Exception as e:
+        print(f"GStreamer init failed: {e}")
         return
 
     serial_port = setup_serial()
@@ -678,16 +678,20 @@ def main():
         FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS, BITRATE_KBPS
     )
 
+    # TCP 수신 스레드 시작
     tcp_thread = threading.Thread(target=tcp_receiver, daemon=True)
     tcp_thread.start()
 
+    # 카메라 초기화
     cap_pipelines = gstreamer_camera_pipeline(FRAME_WIDTH, FRAME_HEIGHT, TARGET_FPS)
     cap = None
 
+    # GStreamer 파이프라인 시도
     for i, pipeline in enumerate(cap_pipelines):
         try:
             cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
             if cap.isOpened():
+                print(f"Camera opened with pipeline {i}")
                 break
             else:
                 cap.release()
@@ -697,6 +701,7 @@ def main():
                 cap.release()
                 cap = None
 
+    # 일반 카메라 장치 시도
     if cap is None:
         for device_id in [0, 1, 2]:
             try:
@@ -704,7 +709,6 @@ def main():
                 if cap.isOpened():
                     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
                     cap.set(cv2.CAP_PROP_FPS, 30)
@@ -714,6 +718,7 @@ def main():
                         cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
                         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
                         cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
+                        print(f"Camera opened with device {device_id}")
                         break
                     else:
                         cap.release()
@@ -729,16 +734,12 @@ def main():
     if cap is None:
         raise RuntimeError("Failed to open camera with any method")
 
-    appsrc = None
-
     last_serial_time = 0.0
     serial_interval = 1.0 / float(TARGET_FPS)
     frame_counter = 0
-    
-    # 좌표 변환 헬퍼 생성 (함수 재정의 방지)
-    coord_converter = CoordinateConverter()
 
     try:
+        # ===== 메인 트래킹 루프 =====
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -747,8 +748,10 @@ def main():
 
             frame_counter += 1
 
+            # 그레이스케일 변환
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+            # 줌 명령 처리
             if zoom_command == 'zoom_in' and zoom_level < 3.0:
                 zoom_level += 0.5
                 zoom_command = None
@@ -756,20 +759,23 @@ def main():
                 zoom_level -= 0.5
                 zoom_command = None
 
+            # ===== 새 좌표 처리 (중심점으로 트래킹 초기화) =====
             process_new_coordinate(gray)
 
             center_x = center_y = 0
             if not target_selected:
                 tracking = False
-                feature_lock_active = False
 
-            if tracking and tracking_points is not None and len(tracking_points) > 0 and prev_frame is not None:
+            # ===== KLT 트래킹 수행 =====
+            if tracking and tracking_points is not None and prev_frame is not None:
                 H, W = gray.shape[:2]
+                
                 if roi_rect is not None:
                     rx, ry, rw, rh = roi_rect
                 else:
                     rx, ry, rw, rh = 0, 0, W, H
 
+                # ROI 경계 제한
                 rx = max(0, min(rx, W - 1))
                 ry = max(0, min(ry, H - 1))
                 rx2 = min(rx + rw, W)
@@ -790,6 +796,7 @@ def main():
 
                         p1_local = None
 
+                        # 스케일 다운 옵션 (성능 최적화)
                         if LK_FRAME_SCALE < 1.0 and roi_width > 1 and roi_height > 1:
                             scaled_w = max(1, int(roi_width * LK_FRAME_SCALE))
                             scaled_h = max(1, int(roi_height * LK_FRAME_SCALE))
@@ -802,6 +809,7 @@ def main():
                             if p1_local is not None:
                                 p1_local = p1_local / LK_FRAME_SCALE
                         else:
+                            # Lucas-Kanade Optical Flow 계산
                             p1_local, st, err = cv2.calcOpticalFlowPyrLK(
                                 prev_roi, gray_roi, local_points, None, **LK_PARAMS
                             )
@@ -810,9 +818,11 @@ def main():
                             p1 = p1_local + offset
                 
                 if p1 is not None and st is not None:
+                    # 성공적으로 추적된 점들만 선택
                     good_new = p1[st == 1]
                     good_old = tracking_points[st == 1]
 
+                    # 적응형 ROI 이동
                     if adaptive_mode and len(good_new) >= MIN_POINTS_FOR_MOVE:
                         centroid = calculate_centroid(good_new)
                         if centroid is not None:
@@ -828,15 +838,18 @@ def main():
                             good_old = good_old[mask_in]
 
                     if len(good_new) > 0:
+                        # 추적 점 업데이트
                         tracking_points = good_new.reshape(-1, 1, 2).astype(np.float32)
                         centroid = calculate_centroid(good_new)
                         if centroid is not None:
                             center_x, center_y = centroid.astype(int)
                     else:
+                        # 추적 실패
                         tracking_points = None
                         tracking = False
                         feature_lock_active = False
 
+                    # 특징점 재검출
                     if (tracking_points is None or len(tracking_points) < MIN_POINTS) and roi_rect is not None:
                         if not (LOCK_INITIAL_FEATURES and feature_lock_active):
                             tracking_points = detect_points_in_roi(gray, roi_rect)
@@ -845,10 +858,12 @@ def main():
 
                 prev_frame = gray
 
+            # ===== 디스플레이 프레임 생성 =====
             display_frame = frame
             zoom_x1 = zoom_y1 = 0
             zoom_applied = False
 
+            # 줌 적용
             if zoom_level > 1.0 and zoom_center is not None:
                 h, w = display_frame.shape[:2]
                 cx, cy = zoom_center
@@ -862,43 +877,60 @@ def main():
                 display_frame = cv2.resize(roi, (w, h))
                 zoom_applied = True
 
-            # 좌표 변환 상태 업데이트 (함수 재정의 대신 클래스 사용)
-            h, w = frame.shape[:2]
-            coord_converter.update(zoom_applied, zoom_level, zoom_x1, zoom_y1, w, h)
+            def original_to_display_coord(ox, oy):
+                """원본 좌표를 디스플레이 좌표로 변환"""
+                if not zoom_applied or zoom_level <= 1.0:
+                    return int(ox), int(oy)
+                rel_x = ox - zoom_x1
+                rel_y = oy - zoom_y1
+                return int(rel_x * zoom_level), int(rel_y * zoom_level)
 
+            def local_display_to_original_coord(dx, dy):
+                """디스플레이 좌표를 원본 좌표로 변환"""
+                if not zoom_applied or zoom_level <= 1.0:
+                    return int(dx), int(dy)
+                rel_x = dx / zoom_level
+                rel_y = dy / zoom_level
+                ox = int(rel_x + zoom_x1)
+                oy = int(rel_y + zoom_y1)
+                h, w = frame.shape[:2]
+                return max(0, min(ox, w - 1)), max(0, min(oy, h - 1))
+
+            display_to_original_coord = lambda dx, dy: local_display_to_original_coord(dx, dy)
+
+            # ===== 추적 결과 시각화 =====
             if tracking and tracking_points is not None:
+                # 추적 점 그리기
                 for pt in tracking_points:
                     arr = pt.ravel().astype(int)
                     x, y = int(arr[0]), int(arr[1])
-                    dx, dy = coord_converter.original_to_display(x, y)
+                    dx, dy = original_to_display_coord(x, y)
                     cv2.circle(display_frame, (dx, dy), 3, (0, 255, 0), -1)
 
-                cx_d, cy_d = coord_converter.original_to_display(center_x, center_y)
+                # 중심점 그리기
+                cx_d, cy_d = original_to_display_coord(center_x, center_y)
                 cv2.circle(display_frame, (cx_d, cy_d), 5, (0, 0, 255), -1)
 
-                # 중심점 변경 감지: 이전 값과 다를 때만 시리얼 전송
-                center_changed = (prev_center_x != center_x or prev_center_y != center_y)
-                
+                # 시리얼 데이터 전송
                 now = time.time()
-                if center_changed and (now - last_serial_time >= serial_interval):
+                if now - last_serial_time >= serial_interval:
                     fh, fw = frame.shape[:2]
                     send_data_to_serial(center_x, center_y, tracking, fw, fh)
                     last_serial_time = now
-                    # 이전 중심점 업데이트
-                    prev_center_x = center_x
-                    prev_center_y = center_y
 
+            # ROI 박스 그리기
             if roi_rect is not None:
                 x, y, w, h = roi_rect
-                dx1, dy1 = coord_converter.original_to_display(x, y)
-                dx2, dy2 = coord_converter.original_to_display(x+w, y+h)
+                dx1, dy1 = original_to_display_coord(x, y)
+                dx2, dy2 = original_to_display_coord(x+w, y+h)
                 color = (0, 255, 255) if adaptive_mode else (255, 128, 0)
                 cv2.rectangle(display_frame, (dx1, dy1), (dx2, dy2), color, 2)
                 
                 cx, cy = x + w//2, y + h//2
-                dcx, dcy = coord_converter.original_to_display(cx, cy)
+                dcx, dcy = original_to_display_coord(cx, cy)
                 cv2.drawMarker(display_frame, (dcx, dcy), color, cv2.MARKER_CROSS, 10, 1)
 
+            # 상태 정보 표시
             status = f"X={int(center_x)}, Y={int(center_y)}" if tracking else "Tracking: OFF"
             cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (0, 255, 0) if tracking else (0, 0, 255), 2)
@@ -919,6 +951,7 @@ def main():
                 cv2.putText(display_frame, "RTSP: WAITING", (10, 130),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
+            # RTSP 스트리밍
             if rtsp_factory.appsrc_list:
                 try:
                     buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
@@ -937,11 +970,12 @@ def main():
                 except Exception as e:
                     pass
 
+            # 종료 신호 체크
             if os.path.exists("stop.signal"):
                 break
 
     except KeyboardInterrupt:
-        pass
+        print("\nProgram interrupted by user")
 
     finally:
         try:
