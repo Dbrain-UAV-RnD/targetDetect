@@ -439,10 +439,10 @@ def tcp_receiver():
             # Target Selection (9바이트: 1바이트 선택여부 + 2바이트 x1 + 2바이트 y1 + 2바이트 x2 + 2바이트 y2)
             if data_length >= 9:
                 target_flag = var_data[0]
-                x1 = struct.unpack('<H', var_data[1:3])[0]  # 좌상단 x
-                y1 = struct.unpack('<H', var_data[3:5])[0]  # 좌상단 y
-                x2 = struct.unpack('<H', var_data[5:7])[0]  # 우하단 x
-                y2 = struct.unpack('<H', var_data[7:9])[0]  # 우하단 y
+                x1 = struct.unpack('>H', var_data[1:3])[0]  # 좌상단 x
+                y1 = struct.unpack('>H', var_data[3:5])[0]  # 좌상단 y
+                x2 = struct.unpack('>H', var_data[5:7])[0]  # 우하단 x
+                y2 = struct.unpack('>H', var_data[7:9])[0]  # 우하단 y
                 
                 # 중심점 계산
                 x = (x1 + x2) // 2
