@@ -398,6 +398,7 @@ def tcp_receiver():
         calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
 
         if received_crc != calculated_crc:
+            print("CRC Fail")
             return
 
         # 명령 바이트 해석
