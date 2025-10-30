@@ -91,6 +91,7 @@ prev_frame = None
 tracking_points = None
 roi_rect = None
 roi_center = None
+prev_roi_center = None  # 이전 ROI 중심점 저장용
 adaptive_mode = True
 feature_lock_active = False
 
@@ -319,6 +320,7 @@ def update_roi_position(roi_rect, target_center, W, H, alpha=ROI_MOVE_ALPHA):
 
 def tcp_receiver():
     global latest_point, new_point_received, target_selected, zoom_command, tracking, zoom_center, feature_lock_active
+    global prev_roi_center
 
     prev_x = prev_y = None
     prev_target_selected = None
@@ -475,6 +477,8 @@ def tcp_receiver():
                 target_selected = False
                 tracking = False
                 feature_lock_active = False
+                prev_roi_center = None  # 이전 중심점 초기화
+                print("[Tracking] 타겟 선택 해제 - 이전 중심점 초기화")
 
         # Zoom 명령 처리 (cmd_byte == 0x05)
         if cmd_byte == 0x05:
@@ -594,7 +598,7 @@ def tcp_receiver():
 
 def process_new_coordinate(gray_frame):
     global latest_point, new_point_received, tracking, prev_frame, tracking_points, roi_rect, roi_center
-    global feature_lock_active
+    global feature_lock_active, prev_roi_center
 
     if not new_point_received:
         return
@@ -605,6 +609,17 @@ def process_new_coordinate(gray_frame):
     if not (0 <= x < gray_frame.shape[1] and 0 <= y < gray_frame.shape[0]):
         return
 
+    # 새로운 중심점이 이전 중심점과 같으면 무시
+    if prev_roi_center is not None:
+        prev_x, prev_y = prev_roi_center
+        if x == prev_x and y == prev_y:
+            print(f"[Tracking] 동일한 중심점 무시: ({x}, {y})")
+            return
+    
+    # 새로운 중심점으로 업데이트
+    prev_roi_center = (x, y)
+    print(f"[Tracking] 새로운 타겟 중심점: ({x}, {y})")
+    
     H, W = gray_frame.shape[:2]
     roi_rect = clamp_roi(x, y, ROI_SIZE, ROI_SIZE, W, H)
     roi_center = (x, y)
@@ -615,8 +630,10 @@ def process_new_coordinate(gray_frame):
         prev_frame = gray_frame
         tracking = True
         feature_lock_active = LOCK_INITIAL_FEATURES
+        print(f"[Tracking] 추적 시작 - 특징점 개수: {len(tracking_points)}")
     else:
         feature_lock_active = False
+        print(f"[Tracking] 특징점을 찾을 수 없음")
 
 def main():
     global serial_port, tracking, prev_frame, tracking_points, roi_rect, roi_center
