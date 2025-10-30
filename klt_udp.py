@@ -72,7 +72,7 @@ SERIAL_CANDIDATES = [
     '/dev/serial0',
     '/dev/ttyAMA10'
 ]
-SERIAL_BAUD = 57600
+SERIAL_BAUD = 115200
 
 latest_point = None
 new_point_received = False
@@ -158,12 +158,17 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.last_debug_time = time.time()
 
         pipeline = (
-            f"appsrc name=source is-live=true format=3 do-timestamp=true "
+            f"appsrc name=source is-live=true format=time do-timestamp=true "
+            f"max-bytes=0 block=true emit-signals=false "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
+            "queue max-size-buffers=3 max-size-time=0 max-size-bytes=0 ! "
             "videoconvert ! video/x-raw,format=I420 ! "
-            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=ultrafast key-int-max=30 bframes=0 "
-            f"rc-lookahead=0 sync-lookahead=0 sliced-threads=true ! "
-            "rtph264pay name=pay0 pt=96 config-interval=1 aggregate-mode=zero-latency"
+            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast "
+            f"threads=4 key-int-max={fps*2} bframes=0 "
+            f"vbv-buf-capacity=1000 byte-stream=true aud=false ! "
+            "h264parse ! "
+            "queue max-size-buffers=3 max-size-time=0 max-size-bytes=0 ! "
+            "rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400"
         )
         self.set_launch(pipeline)
         self.set_shared(True)
