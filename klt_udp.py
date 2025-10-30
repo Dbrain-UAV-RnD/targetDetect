@@ -61,7 +61,7 @@ ROI_MOVE_ALPHA = 1
 MIN_POINTS_FOR_MOVE = 0
 LOCK_INITIAL_FEATURES = True
 
-UDP_HOST = '192.168.10.219'
+UDP_HOST = '192.168.144.61'
 UDP_PORT = 5001
 
 RTSP_PORT = 8554
@@ -89,48 +89,6 @@ adaptive_mode = True
 feature_lock_active = False
 
 serial_port = None
-
-crc16_table = [0x0000, 0xc0c1, 0xc181, 0x0140, 0xc301, 0x03c0, 0x0280, 0xc241, 
-    0xc601, 0x06c0, 0x0780, 0xc741, 0x0500, 0xc5c1, 0xc481, 0x0440, 
-    0xcc01, 0x0cc0, 0x0d80, 0xcd41, 0x0f00, 0xcfc1, 0xce81, 0x0e40, 
-    0x0a00, 0xcac1, 0xcb81, 0x0b40, 0xc901, 0x09c0, 0x0880, 0xc841, 
-    0xd801, 0x18c0, 0x1980, 0xd941, 0x1b00, 0xdbc1, 0xda81, 0x1a40, 
-    0x1e00, 0xdec1, 0xdf81, 0x1f40, 0xdd01, 0x1dc0, 0x1c80, 0xdc41, 
-    0x1400, 0xd4c1, 0xd581, 0x1540, 0xd701, 0x17c0, 0x1680, 0xd641, 
-    0xd201, 0x12c0, 0x1380, 0xd341, 0x1100, 0xd1c1, 0xd081, 0x1040, 
-    0xf001, 0x30c0, 0x3180, 0xf141, 0x3300, 0xf3c1, 0xf281, 0x3240, 
-    0x3600, 0xf6c1, 0xf781, 0x3740, 0xf501, 0x35c0, 0x3480, 0xf441, 
-    0x3c00, 0xfcc1, 0xfd81, 0x3d40, 0xff01, 0x3fc0, 0x3e80, 0xfe41, 
-    0xfa01, 0x3ac0, 0x3b80, 0xfb41, 0x3900, 0xf9c1, 0xf881, 0x3840, 
-    0x2800, 0xe8c1, 0xe981, 0x2940, 0xeb01, 0x2bc0, 0x2a80, 0xea41, 
-    0xee01, 0x2ec0, 0x2f80, 0xef41, 0x2d00, 0xedc1, 0xec81, 0x2c40, 
-    0xe401, 0x24c0, 0x2580, 0xe541, 0x2700, 0xe7c1, 0xe681, 0x2640, 
-    0x2200, 0xe2c1, 0xe381, 0x2340, 0xe101, 0x21c0, 0x2080, 0xe041, 
-    0xa001, 0x60c0, 0x6180, 0xa141, 0x6300, 0xa3c1, 0xa281, 0x6240, 
-    0x6600, 0xa6c1, 0xa781, 0x6740, 0xa501, 0x65c0, 0x6480, 0xa441, 
-    0x6c00, 0xacc1, 0xad81, 0x6d40, 0xaf01, 0x6fc0, 0x6e80, 0xae41, 
-    0xaa01, 0x6ac0, 0x6b80, 0xab41, 0x6900, 0xa9c1, 0xa881, 0x6840, 
-    0x7800, 0xb8c1, 0xb981, 0x7940, 0xbb01, 0x7bc0, 0x7a80, 0xba41, 
-    0xbe01, 0x7ec0, 0x7f80, 0xbf41, 0x7d00, 0xbdc1, 0xbc81, 0x7c40, 
-    0xb401, 0x74c0, 0x7580, 0xb541, 0x7700, 0xb7c1, 0xb681, 0x7640, 
-    0x7200, 0xb2c1, 0xb381, 0x7340, 0xb101, 0x71c0, 0x7080, 0xb041, 
-    0x5000, 0x90c1, 0x9181, 0x5140, 0x9301, 0x53c0, 0x5280, 0x9241, 
-    0x9601, 0x56c0, 0x5780, 0x9741, 0x5500, 0x95c1, 0x9481, 0x5440, 
-    0x9c01, 0x5cc0, 0x5d80, 0x9d41, 0x5f00, 0x9fc1, 0x9e81, 0x5e40, 
-    0x5a00, 0x9ac1, 0x9b81, 0x5b40, 0x9901, 0x59c0, 0x5880, 0x9841, 
-    0x8801, 0x48c0, 0x4980, 0x8941, 0x4b00, 0x8bc1, 0x8a81, 0x4a40, 
-    0x4e00, 0x8ec1, 0x8f81, 0x4f40, 0x8d01, 0x4dc0, 0x4c80, 0x8c41, 
-    0x4400, 0x84c1, 0x8581, 0x4540, 0x8701, 0x47c0, 0x4680, 0x8641, 
-    0x8201, 0x42c0, 0x4380, 0x8341, 0x4100, 0x81c1, 0x8081, 0x4040]
-
-def crc16_modbus(init_crc, dat, len):
-    crc = [init_crc >> 8, init_crc & 0xFF]    
-    for b in dat:
-        tmp = crc16_table[crc[0] ^ b]
-        crc[0] = (tmp & 0xFF) ^ crc[1]
-        crc[1] = tmp>>8
-    
-    return (crc[0]|crc[1]<<8)
 
 def display_to_original_coord(x, y):
     return int(x), int(y)
@@ -334,146 +292,47 @@ def udp_receiver():
     try:
         while True:
             try:
-                data, _ = udp_socket.recvfrom(64)  # 최대 패킷 크기를 충분히 크게
+                data, _ = udp_socket.recvfrom(8)
             except socket.timeout:
                 continue
             except Exception:
                 break
-
-            # 최소 패킷 크기 체크: 2(header) + 1 + 2(len) + 2 + 1 + 1(최소 data) + 2(crc) = 11
-            if len(data) < 11:
+            if len(data) < 8 or data[0] != 0xAA or data[1] != 0x77:
                 continue
-
-            # 헤더 체크 (0x55 0x66으로 가정)
-            if data[0] != 0x55 or data[1] != 0x66:
+            x = struct.unpack('<H', data[2:4])[0]
+            y = struct.unpack('<H', data[4:6])[0]
+            is_target = (data[6] == 0xFF)
+            zoom_cmd = data[7]
+            if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
                 continue
-
-            # 3번째 바이트가 1인지 체크
-            if data[2] != 0x01:
-                continue
-
-            # 데이터 길이 읽기 (리틀 엔디안)
-            data_length = struct.unpack('<H', data[3:5])[0]
-
-            # 4~5번째 바이트가 0인지 체크
-            if data[5] != 0x00 or data[6] != 0x00:
-                continue
-
-            # 전체 패킷 길이 계산: 2 + 1 + 2 + 2 + 1 + data_length + 2
-            expected_length = 10 + data_length
-            if len(data) < expected_length:
-                continue
-
-            # 명령 바이트 (0 또는 4~6)
-            cmd_byte = data[7]
-            if cmd_byte not in [0x00, 0x04, 0x05, 0x06]:
-                continue
-
-            # 가변 데이터 추출
-            var_data = data[8:8+data_length]
-
-            # CRC 체크
-            crc_start = 8 + data_length
-            if len(data) < crc_start + 2:
-                continue
-
-            received_crc = struct.unpack('<H', data[crc_start:crc_start+2])[0]
-            calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
-
-            if received_crc != calculated_crc:
-                continue
-
-            # 명령 바이트 해석
-            # 0x00: TCP Heartbeat (가변 1바이트: 0x00 고정)
-            # 0x04: AI Mode (가변 1바이트: 0 또는 1)
-            # 0x05: Zoom Mode (가변 1바이트: -1/0/1)
-            # 0x06: Target Selection (가변 9바이트: 1바이트 선택여부 + 4바이트 x + 4바이트 y)
-            
-            x = y = None
-            is_target = False
-            zoom_cmd = 0x00
-            ai_mode = None
-            
-            if cmd_byte == 0x00:
-                # TCP Heartbeat - 아무 동작 안함
-                if data_length >= 1 and var_data[0] == 0x00:
-                    continue
-                    
-            elif cmd_byte == 0x04:
-                # AI Mode
-                if data_length >= 1:
-                    ai_mode = var_data[0]
-                    # AI 모드 활성화/비활성화 처리
-                    # 여기에 AI 모드 관련 로직 추가 가능
-                    
-            elif cmd_byte == 0x05:
-                # Zoom Mode
-                if data_length >= 1:
-                    zoom_value = struct.unpack('b', var_data[0:1])[0]  # signed byte
-                    if zoom_value == 1:
-                        zoom_cmd = 0x02  # zoom in
-                    elif zoom_value == -1:
-                        zoom_cmd = 0x01  # zoom out
-                    else:
-                        zoom_cmd = 0x00  # none
-                        
-            elif cmd_byte == 0x06:
-                # Target Selection (9바이트: 1바이트 선택여부 + 2바이트 x1 + 2바이트 y1 + 2바이트 x2 + 2바이트 y2)
-                if data_length >= 9:
-                    target_flag = var_data[0]
-                    x1 = struct.unpack('<H', var_data[1:3])[0]  # 좌상단 x
-                    y1 = struct.unpack('<H', var_data[3:5])[0]  # 좌상단 y
-                    x2 = struct.unpack('<H', var_data[5:7])[0]  # 우하단 x
-                    y2 = struct.unpack('<H', var_data[7:9])[0]  # 우하단 y
-                    
-                    # 중심점 계산
-                    x = (x1 + x2) // 2
-                    y = (y1 + y2) // 2
-                    is_target = (target_flag == 0x01)
-
-            # 중복 데이터 필터링 (heartbeat 제외)
-            if cmd_byte != 0x00:
-                if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
-                    continue
-
-                prev_x, prev_y = x, y
-                prev_target_selected = is_target
-                prev_zoom_cmd = zoom_cmd
-
-            # Target Selection 처리 (cmd_byte == 0x06)
-            if cmd_byte == 0x06 and x is not None and y is not None:
-                orig_x, orig_y = x, y
-                try:
-                    orig_x, orig_y = display_to_original_coord(x, y)
-                except Exception:
-                    pass
-
-                if is_target:
-                    latest_point = (orig_x, orig_y)
-                    new_point_received = True
-                    target_selected = True
-                    # 타겟 선택 시 줌 센터 업데이트
-                    if zoom_center is None:
-                        zoom_center = (orig_x, orig_y)
-                else:
-                    # 타겟 선택 해제
-                    target_selected = False
-                    tracking = False
-                    feature_lock_active = False
-
-            # Zoom 명령 처리 (cmd_byte == 0x05)
-            if cmd_byte == 0x05:
-                if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
-                    zoom_command = 'zoom_in'
-                    # zoom_center가 없으면 화면 중앙으로
-                    if zoom_center is None:
-                        zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
-                elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
-                    zoom_command = 'zoom_out'
-                    if zoom_center is None:
-                        zoom_center = (FRAME_WIDTH // 2, FRAME_HEIGHT // 2)
-                elif zoom_cmd == 0x00:
-                    zoom_command = None
+            prev_x, prev_y = x, y
+            prev_target_selected = is_target
+            prev_zoom_cmd = zoom_cmd
+            orig_x, orig_y = x, y
+            try:
+                orig_x, orig_y = display_to_original_coord(x, y)
+            except Exception:
+                pass
+            if is_target:
+                latest_point = (orig_x, orig_y)
+                new_point_received = True
+                target_selected = True
+                if zoom_center is None:
+                    zoom_center = (orig_x, orig_y)
+            elif data[6] == 0x00 and target_selected:
+                target_selected = False
+                tracking = False
+                feature_lock_active = False
+            if zoom_cmd == 0x02 and zoom_command != 'zoom_in':
+                zoom_command = 'zoom_in'
+                if zoom_center is None:
+                    zoom_center = (orig_x, orig_y)
+            elif zoom_cmd == 0x01 and zoom_command != 'zoom_out':
+                zoom_command = 'zoom_out'
+                if zoom_center is None:
+                    zoom_center = (orig_x, orig_y)
+            elif zoom_cmd == 0x00:
+                zoom_command = None
 
     finally:
         try:
