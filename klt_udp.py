@@ -66,7 +66,7 @@ UDP_PORT = 5001
 
 RTSP_PORT = 8554
 RTSP_MOUNT_POINT = '/video0'
-BITRATE_KBPS = 6000
+BITRATE_KBPS = 4500
 
 SERIAL_CANDIDATES = [
     '/dev/serial0',
@@ -187,7 +187,6 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
                 appsrc.set_property('emit-signals', False)
 
     def push_frame(self, frame):
-        """모든 활성 클라이언트에게 프레임 푸시"""
         if not self.appsrc_list:
             return
         
@@ -223,7 +222,6 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
 
     @property
     def appsrc(self):
-        """하위 호환성용 - push_frame() 사용 권장"""
         return self.appsrc_list[0] if self.appsrc_list else None
 
 def on_client_connected(server, client):
@@ -665,7 +663,6 @@ def main():
                 cv2.putText(display_frame, "RTSP: WAITING", (10, 130),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
-            # ✅ 핵심 변경: 단순하게 push_frame() 호출
             rtsp_factory.push_frame(display_frame)
 
             if os.path.exists("stop.signal"):
