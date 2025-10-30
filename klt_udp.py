@@ -158,17 +158,12 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.last_debug_time = time.time()
 
         pipeline = (
-            f"appsrc name=source is-live=true format=time do-timestamp=true "
-            f"max-bytes=0 block=true emit-signals=false "
+            f"appsrc name=source is-live=true format=3 do-timestamp=true "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-            "queue max-size-buffers=3 max-size-time=0 max-size-bytes=0 ! "
-            "videoconvert ! video/x-raw,format=I420 ! "
-            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=superfast "
-            f"threads=4 key-int-max={fps*2} bframes=0 "
-            f"vbv-buf-capacity=1000 byte-stream=true aud=false ! "
-            "h264parse ! "
-            "queue max-size-buffers=3 max-size-time=0 max-size-bytes=0 ! "
-            "rtph264pay name=pay0 pt=96 config-interval=1 mtu=1400"
+            f"videoconvert ! video/x-raw,format=I420 ! "
+            f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=ultrafast key-int-max=24 bframes=0 "
+            f"rc-lookahead=0 sync-lookahead=0 sliced-threads=true ! "
+            f"rtph264pay name=pay0 pt=96 config-interval=1 aggregate-mode=zero-latency"
         )
         self.set_launch(pipeline)
         self.set_shared(True)
@@ -420,7 +415,7 @@ def main():
 
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-                    cap.set(cv2.CAP_PROP_FPS, 30)
+                    cap.set(cv2.CAP_PROP_FPS, 24)
 
                     ret, test_frame = cap.read()
                     if ret:
