@@ -415,9 +415,9 @@ def tcp_receiver():
         received_crc = struct.unpack('<H', data[crc_start:crc_start+2])[0]
         calculated_crc = crc16_modbus(0xFFFF, data[0:crc_start], crc_start)
 
-        # if received_crc != calculated_crc:
-        #     print("[CRC Error] Packet CRC mismatch")
-        #     return
+        if received_crc != calculated_crc:
+            print("[CRC Error] Packet CRC mismatch")
+            return
 
         # 명령 바이트 해석
         # 0x00: TCP Heartbeat
@@ -477,7 +477,7 @@ def tcp_receiver():
             if (x == prev_x and y == prev_y and is_target == prev_target_selected and zoom_cmd == prev_zoom_cmd):
                 return
 
-            prev_x, prev_y = x, y
+            prev_x, prev_y = 400, 400
             prev_target_selected = is_target
             prev_zoom_cmd = zoom_cmd
 
