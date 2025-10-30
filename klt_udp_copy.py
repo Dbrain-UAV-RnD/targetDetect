@@ -155,23 +155,24 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
         self.appsrc_list = []
         self.client_connected = False
         self.frame_count = 0
-        self.start_time = None
-        self.frame_duration_ns = int(1_000_000_000 / fps)
+        self.last_debug_time = time.time()
 
         pipeline = (
-            f"appsrc name=source is-live=true format=3 do-timestamp=false "
+            f"appsrc name=source is-live=true format=3 do-timestamp=true "
             f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-            f"queue max-size-buffers=2 leaky=downstream ! "
             f"videoconvert ! video/x-raw,format=I420 ! "
             f"x264enc bitrate={bitrate_kbps} tune=zerolatency speed-preset=ultrafast key-int-max=24 bframes=0 "
             f"rc-lookahead=0 sync-lookahead=0 sliced-threads=true ! "
-            f"queue max-size-buffers=2 leaky=downstream ! "
             f"rtph264pay name=pay0 pt=96 config-interval=1 aggregate-mode=zero-latency"
         )
         self.set_launch(pipeline)
         self.set_shared(True)
 
         self.connect("media-configure", self.on_media_configure)
+        self.connect("media-constructed", self.on_media_constructed)
+    
+    def on_media_constructed(self, factory, media):
+        pass
 
     def on_media_configure(self, factory, media):
         element = media.get_element()
@@ -185,45 +186,12 @@ class RTSPServerFactory(GstRtspServer.RTSPMediaFactory):
                 appsrc.set_property('block', False)
                 appsrc.set_property('max-bytes', 0)
                 appsrc.set_property('emit-signals', False)
-
-    def push_frame(self, frame):
-        """모든 활성 클라이언트에게 프레임 푸시"""
-        if not self.appsrc_list:
-            return
-        
-        # PTS 계산
-        if self.start_time is None:
-            self.start_time = time.time()
-        
-        pts = self.frame_count * self.frame_duration_ns
-        
-        # Dead appsrc 제거하면서 프레임 푸시
-        active_appsrc = []
-        for appsrc in self.appsrc_list:
-            try:
-                # 버퍼 생성
-                buf = Gst.Buffer.new_wrapped(frame.tobytes())
-                buf.pts = pts
-                buf.duration = self.frame_duration_ns
-                
-                # 프레임 푸시
-                ret = appsrc.emit('push-buffer', buf)
-                
-                if ret == Gst.FlowReturn.OK:
-                    active_appsrc.append(appsrc)
-                # ret가 FLUSHING이나 EOS면 연결 끊김
-            except Exception as e:
-                print(f"Failed to push frame to appsrc: {e}")
-        
-        # 리스트 업데이트
-        self.appsrc_list = active_appsrc
-        self.client_connected = len(self.appsrc_list) > 0
-        
-        self.frame_count += 1
+                appsrc.set_property('min-latency', 0)
+                appsrc.set_property('max-latency', 0)
+                appsrc.set_property('leaky-type', 2)
 
     @property
     def appsrc(self):
-        """하위 호환성용 - push_frame() 사용 권장"""
         return self.appsrc_list[0] if self.appsrc_list else None
 
 def on_client_connected(server, client):
@@ -665,8 +633,23 @@ def main():
                 cv2.putText(display_frame, "RTSP: WAITING", (10, 130),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
-            # ✅ 핵심 변경: 단순하게 push_frame() 호출
-            rtsp_factory.push_frame(display_frame)
+            if rtsp_factory.appsrc_list:
+                try:
+                    buf = Gst.Buffer.new_allocate(None, display_frame.nbytes, None)
+                    buf.fill(0, display_frame.tobytes())
+
+                    for i, appsrc in enumerate(rtsp_factory.appsrc_list):
+                        if appsrc is not None:
+                            ret = appsrc.emit("push-buffer", buf)
+
+                    rtsp_factory.frame_count += 1
+
+                    now = time.time()
+                    if now - rtsp_factory.last_debug_time >= 5.0:
+                        rtsp_factory.last_debug_time = now
+
+                except Exception as e:
+                    pass
 
             if os.path.exists("stop.signal"):
                 break
