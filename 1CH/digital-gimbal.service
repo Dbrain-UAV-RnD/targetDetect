@@ -1,0 +1,32 @@
+[Unit]
+Description=Digital Gimbal 1CH (single imx708 / Camera Module 3)
+Documentation=file:/home/gimbal/1CH/digital_gimbal.py
+After=network.target
+Wants=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=gimbal
+Group=gimbal
+WorkingDirectory=/home/gimbal
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+ExecStartPre=+/home/gimbal/1CH/gimbal-camera-ready.sh
+
+ExecStart=/home/gimbal/.venv-gimbal/bin/python -u /home/gimbal/1CH/digital_gimbal.py
+
+Restart=always
+RestartSec=5
+
+KillSignal=SIGTERM
+TimeoutStopSec=15
+KillMode=control-group
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
