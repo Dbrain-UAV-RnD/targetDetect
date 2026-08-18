@@ -87,7 +87,7 @@ def main():
                 name_size = v.name
             else:
                 name_off = v.name
-        assert None not in (name_score, name_size, name_off), "출력 매핑 실패"
+        assert None not in (name_score, name_size, name_off)
         for v in ovs:
             a = r0[v.name]
 

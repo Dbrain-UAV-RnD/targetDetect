@@ -527,7 +527,7 @@ class HailoDetector:
                 last_err = e
                 self.pipe = None
         else:
-            raise RuntimeError(f"쓸 수 있는 HEF 없음: {last_err}")
+            raise RuntimeError(last_err)
 
         self.lock = threading.Lock()
         self.pending = None

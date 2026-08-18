@@ -437,7 +437,7 @@ class LightFCTracker:
             else:
                 off = n
         if None in (score, size, off):
-            raise RuntimeError("head_back 출력 매핑 실패: %s" % self.hb_out)
+            raise RuntimeError(self.hb_out)
         return (score, size, off)
 
     @staticmethod
@@ -594,7 +594,7 @@ class HailoDetector:
                 last_err = e
                 self.pipe = None
         else:
-            raise RuntimeError(f"쓸 수 있는 HEF 없음: {last_err}")
+            raise RuntimeError(last_err)
 
         self.lock = threading.Lock()
         self.pending = None
