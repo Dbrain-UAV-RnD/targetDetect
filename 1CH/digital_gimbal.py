@@ -3,7 +3,6 @@
 import cv2
 import numpy as np
 import collections
-import hashlib
 import math
 import os
 import signal
@@ -12,7 +11,6 @@ import threading
 import time
 import json
 import struct
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CAMERA_INDEX = 0
 
@@ -90,6 +88,8 @@ ORT_SPINNING = os.environ.get("ORT_SPINNING", "0") not in ("0", "false", "no")
 PRED_ENABLE = os.environ.get("PRED_ENABLE", "1") not in ("0", "false", "no")
 PRED_MAX_AGE = float(os.environ.get("PRED_MAX_AGE", "0.15"))
 LFC_DUMP_DIR = os.environ.get("LFC_DUMP_DIR", "")
+STATUS_FILE = os.environ.get("STATUS_FILE", "")
+STATUS_EVERY = int(os.environ.get("STATUS_EVERY", str(FPS)))
 LFC_DUMP_N   = int(os.environ.get("LFC_DUMP_N", "256"))
 LFC_DUMP_EVERY = int(os.environ.get("LFC_DUMP_EVERY", "3"))
 LFC_INIT_BOX  = 90 * CAP_K
@@ -98,8 +98,6 @@ LFC_IN_X  = "lightfc_backbone_scope2/input_layer2"
 LFC_OUT_Z = "lightfc_backbone_scope1/conv26"
 LFC_OUT_X = "lightfc_backbone_scope2/conv52"
 
-HTTP_PORT    = 8082
-JPEG_QUALITY = 80
 
 RTSP_PORT    = int(os.environ.get("RTSP_PORT", "554"))
 RTSP_PATH    = "/video0"
@@ -174,23 +172,6 @@ def frame_jitter(samples):
 def base_window():
     w = min(CAP_W, CAP_H * OUT_ASPECT)
     return w, w / OUT_ASPECT
-
-
-def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-    finally:
-        s.close()
-
-
-def to3x3(m):
-    out = np.eye(3, dtype=np.float64)
-    out[:2, :] = m
-    return out
 
 
 def apply_pt(m, x, y):
@@ -852,10 +833,6 @@ class VirtualPTZ:
         with self.lock:
             self.cx_t, self.cy_t = self._clamp_center(tx, ty, self.zoom_t)
 
-    def nudge_zoom(self, dz):
-        with self.lock:
-            self.zoom_t = max(MIN_ZOOM, min(MAX_ZOOM, self.zoom_t + dz))
-            self.cx_t, self.cy_t = self._clamp_center(self.cx_t, self.cy_t, self.zoom_t)
 
     def set_zoom(self, z):
         with self.lock:
@@ -878,40 +855,6 @@ class VirtualPTZ:
             w, h = self._win_for(self.zoom)
         return (max(0.0, (CAP_W - w) / 2),
                 max(0.0, (CAP_H - h) / 2))
-
-
-class FrameHub:
-    def __init__(self):
-        self.cond = threading.Condition()
-        self.jpeg = None
-        self.seq = 0
-        self.frame_id = 0
-        self.viewers = 0
-
-    def add_viewer(self):
-        with self.cond:
-            self.viewers += 1
-
-    def remove_viewer(self):
-        with self.cond:
-            self.viewers = max(0, self.viewers - 1)
-
-    def has_viewers(self):
-        with self.cond:
-            return self.viewers > 0
-
-    def publish(self, jpeg_bytes, frame_id):
-        with self.cond:
-            self.jpeg = jpeg_bytes
-            self.frame_id = frame_id
-            self.seq += 1
-            self.cond.notify_all()
-
-    def wait_next(self, last_seq, timeout=1.0):
-        with self.cond:
-            if self.seq == last_seq:
-                self.cond.wait(timeout)
-            return self.jpeg, self.seq, self.frame_id
 
 
 class RtspServer:
@@ -1022,9 +965,6 @@ class SharedState:
         with self.lock:
             self.gain = list(values)
 
-    def toggle_show_det(self):
-        with self.lock:
-            self.show_det = not self.show_det
 
     def set_show_det(self, on):
         with self.lock:
@@ -1107,7 +1047,6 @@ class SharedState:
 CAMERA_REF = {}
 LFC_REF = {}
 
-hub = FrameHub()
 ptz = VirtualPTZ()
 state = SharedState()
 rtsp = None
@@ -1214,6 +1153,29 @@ def gcs_loop():
             handle_gcs_message(data)
         except Exception as e:
             pass
+
+
+def write_status(frame_id):
+    st = state.snapshot()
+    cx, cy, z = ptz.state()
+    rx, ry = ptz.pan_range()
+    st["frame_id"] = frame_id
+    st["pan"] = [round(cx), round(cy)]
+    st["zoom"] = round(z, 2)
+    st["zoom_max"] = round(MAX_ZOOM, 2)
+    st["zoom_real"] = round(REAL_ZOOM, 2)
+    st["zoom_rate"] = round(ptz.zoom_rate_now(), 3)
+    st["pan_range"] = [round(rx), round(ry)]
+    st["rtsp"] = rtsp.info() if rtsp is not None else {"on": False}
+    lfc = LFC_REF.get("lfc")
+    if lfc is not None:
+        sg = lfc.stage_stats()
+        if sg is not None:
+            st["lfc_stage"] = sg
+    tmp = STATUS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f, ensure_ascii=False)
+    os.replace(tmp, STATUS_FILE)
 
 
 def pipeline():
@@ -1422,273 +1384,15 @@ def pipeline():
 
             if rtsp is not None:
                 rtsp.push(out)
+            if STATUS_FILE and frame_id % STATUS_EVERY == 0:
+                try:
+                    write_status(frame_id)
+                except Exception:
+                    pass
             t_loop_end = time.perf_counter()
 
-            if hub.has_viewers():
-                ok, enc = cv2.imencode(".jpg", out,
-                                       [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-                if ok:
-                    hub.publish(enc.tobytes(), frame_id)
     finally:
         cam.release()
-
-
-PAGE = r"""<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Digital Gimbal</title>
-<style>
-  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
-  body { display:flex; align-items:center; justify-content:center; }
-  #video { display:block; max-width:100vw; max-height:100vh; cursor:crosshair; }
-</style>
-</head>
-<body>
-<canvas id="video" width="__OUT_W__" height="__OUT_H__"></canvas>
-<script>
-function post(path, body) {
-  return fetch(path, {method:'POST', body: body ? JSON.stringify(body) : null});
-}
-function pan(dx, dy) { post('/ptz', {dx:dx, dy:dy}); }
-function zoom(dz)    { post('/ptz', {dz:dz}); }
-
-const cv = document.getElementById('video');
-const ctx = cv.getContext('2d');
-let shownId = 0;
-
-function find(buf, a, b, from) {
-  for (let i = from; i < buf.length - 1; i++)
-    if (buf[i] === a && buf[i+1] === b) return i;
-  return -1;
-}
-
-async function stream() {
-  for (;;) {
-    try {
-      const res = await fetch('/stream');
-      const reader = res.body.getReader();
-      let buf = new Uint8Array(0);
-      for (;;) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        const nb = new Uint8Array(buf.length + value.length);
-        nb.set(buf); nb.set(value, buf.length); buf = nb;
-
-        let last = null, lastId = 0, s, e;
-        while ((s = find(buf, 0xFF, 0xD8, 0)) >= 0 &&
-               (e = find(buf, 0xFF, 0xD9, s + 2)) > s) {
-          const hdr = new TextDecoder('latin1').decode(buf.subarray(0, s));
-          const m = hdr.match(/X-Frame-Id:\s*(\d+)/i);
-          if (m) lastId = parseInt(m[1], 10);
-          last = buf.slice(s, e + 2);
-          buf = buf.slice(e + 2);
-        }
-        if (last) {
-          const bmp = await createImageBitmap(new Blob([last], {type:'image/jpeg'}));
-          ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
-          bmp.close();
-          shownId = lastId;
-        }
-        if (buf.length > 4 << 20) buf = new Uint8Array(0);
-      }
-    } catch (err) {}
-    await new Promise(r => setTimeout(r, 500));
-  }
-}
-stream();
-
-let dragging = false, dx0 = 0, dy0 = 0;
-
-function rel(e) {
-  const r = cv.getBoundingClientRect();
-  return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
-}
-
-cv.addEventListener('pointerdown', function(e) {
-  const [x, y] = rel(e);
-  if (x < 0 || x > 1 || y < 0 || y > 1) return;
-  dragging = true; dx0 = x; dy0 = y;
-  cv.setPointerCapture(e.pointerId);
-});
-
-cv.addEventListener('pointerup', function(e) {
-  if (!dragging) return;
-  dragging = false;
-  const [x, y] = rel(e);
-  const w = Math.abs(x - dx0), h = Math.abs(y - dy0);
-  if (w < 0.015 || h < 0.015) {
-    post('/click', {x: dx0, y: dy0, fid: shownId});
-  } else {
-    post('/click', {x: (dx0 + x) / 2, y: (dy0 + y) / 2, fid: shownId,
-                    box: [Math.min(dx0, x), Math.min(dy0, y),
-                          Math.max(dx0, x), Math.max(dy0, y)]});
-  }
-});
-
-document.addEventListener('keydown', function(e) {
-  const k = e.key;
-  if (k === 'ArrowLeft')       { pan(-1,0); e.preventDefault(); }
-  else if (k === 'ArrowRight') { pan(1,0);  e.preventDefault(); }
-  else if (k === 'ArrowUp')    { pan(0,-1); e.preventDefault(); }
-  else if (k === 'ArrowDown')  { pan(0,1);  e.preventDefault(); }
-  else if (k === '+' || k === '=') zoom(1);
-  else if (k === '-' || k === '_') zoom(-1);
-  else if (k === 'c' || k === 'C') post('/clear');
-  else if (k === 'r' || k === 'R') post('/recenter');
-  else if (k === 'd' || k === 'D') post('/toggle_det');
-});
-
-const MY_BUILD = "__BUILD__";
-setInterval(function() {
-  fetch('/status').then(r => r.json()).then(function(s) {
-    if (s.build && s.build !== MY_BUILD) location.reload();
-  }).catch(function(){});
-}, 3000);
-</script>
-</body>
-</html>
-"""
-
-
-def build_page():
-    return (PAGE.replace("__OUT_W__", str(OUT_W))
-                .replace("__OUT_H__", str(OUT_H))
-                .replace("__BUILD__", PAGE_BUILD))
-
-
-PAGE_BUILD = hashlib.sha1(PAGE.encode("utf-8")).hexdigest()[:8]
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def _json_body(self):
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-            if n <= 0:
-                return {}
-            return json.loads(self.rfile.read(n).decode("utf-8"))
-        except Exception:
-            return {}
-
-    def _ok(self, payload=b"ok", ctype="text/plain"):
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Expires", "0")
-            body = build_page().encode("utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        elif self.path == "/status":
-            s = state.snapshot()
-            s["build"] = PAGE_BUILD
-            cx, cy, z = ptz.state()
-            rx, ry = ptz.pan_range()
-            s["pan"] = [round(cx), round(cy)]
-            s["zoom"] = round(z, 2)
-            s["zoom_max"] = round(MAX_ZOOM, 2)
-            s["zoom_real"] = round(REAL_ZOOM, 2)
-            s["zoom_rate"] = round(ptz.zoom_rate_now(), 3)
-            s["pan_range"] = [round(rx), round(ry)]
-            s["rtsp"] = rtsp.info() if rtsp is not None else {"on": False}
-            _lfc = LFC_REF.get("lfc")
-            if _lfc is not None:
-                st = _lfc.stage_stats()
-                if st is not None:
-                    s["lfc_stage"] = st
-            self._ok(json.dumps(s).encode(), "application/json")
-
-        elif self.path == "/stream":
-            self.send_response(200)
-            self.send_header("Age", "0")
-            self.send_header("Cache-Control", "no-cache, private")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=FRAME")
-            self.end_headers()
-            seq = -1
-            hub.add_viewer()
-            try:
-                while True:
-                    jpeg, seq, fid = hub.wait_next(seq)
-                    if jpeg is None:
-                        continue
-                    self.wfile.write(b"--FRAME\r\n")
-                    self.send_header("Content-Type", "image/jpeg")
-                    self.send_header("Content-Length", str(len(jpeg)))
-                    self.send_header("X-Frame-Id", str(fid))
-                    self.end_headers()
-                    self.wfile.write(jpeg)
-                    self.wfile.write(b"\r\n")
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            finally:
-                hub.remove_viewer()
-        else:
-            self.send_error(404)
-
-    def do_POST(self):
-        body = self._json_body()
-
-        if self.path == "/ptz":
-            dx = float(body.get("dx", 0)) * PAN_STEP
-            dy = float(body.get("dy", 0)) * PAN_STEP
-            dz = float(body.get("dz", 0)) * ZOOM_STEP
-            if dx or dy:
-                state.request_clear()
-                ptz.pan(dx, dy)
-            if dz:
-                ptz.nudge_zoom(dz)
-            self._ok()
-
-        elif self.path == "/recenter":
-            state.request_clear()
-            ptz.recenter()
-            self._ok()
-
-        elif self.path == "/toggle_det":
-            state.toggle_show_det()
-            self._ok()
-
-        elif self.path == "/clear":
-            state.request_clear()
-            self._ok()
-
-        elif self.path == "/click":
-            try:
-                nx = float(body.get("x", 0.5))
-                ny = float(body.get("y", 0.5))
-            except (TypeError, ValueError):
-                self.send_error(400)
-                return
-            try:
-                fid = int(body.get("fid", 0))
-            except (TypeError, ValueError):
-                fid = 0
-            box = body.get("box")
-            if box:
-                try:
-                    box = [float(box[0]) * OUT_W, float(box[1]) * OUT_H,
-                           float(box[2]) * OUT_W, float(box[3]) * OUT_H]
-                except (TypeError, ValueError, IndexError):
-                    box = None
-            state.push_click(nx * OUT_W, ny * OUT_H, fid, box)
-            self._ok()
-        else:
-            self.send_error(404)
 
 
 def main():
@@ -1708,13 +1412,8 @@ def main():
     except Exception as e:
         rtsp = None
 
-    threading.Thread(target=pipeline, daemon=True).start()
     threading.Thread(target=gcs_loop, daemon=True).start()
-    srv = ThreadingHTTPServer(("", HTTP_PORT), Handler)
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    pipeline()
 
 
 if __name__ == "__main__":
