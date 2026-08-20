@@ -16,7 +16,8 @@ CAMERA_INDEX = 0
 
 CAP_W = int(os.environ.get("CAP_W", "2304"))
 CAP_H = int(os.environ.get("CAP_H", "1296"))
-OUT_W, OUT_H = 1280, 720
+OUT_W = int(os.environ.get("OUT_W", "1280"))
+OUT_H = int(os.environ.get("OUT_H", "720"))
 FPS          = int(os.environ.get("FPS", "24"))
 ROTATION     = 0
 
@@ -41,6 +42,11 @@ DEFAULT_ZOOM = 1.0
 MAX_ZOOM     = float(os.environ.get("MAX_ZOOM", "5.0"))
 REAL_ZOOM    = CAP_W / OUT_W
 CAP_K        = CAP_W / 1920.0
+
+CAM_HFOV_DEG = float(os.environ.get("CAM_HFOV_DEG", "66.0"))
+CAM_VFOV_DEG = float(os.environ.get("CAM_VFOV_DEG", "41.0"))
+CAM_HFOV_TAN = math.tan(math.radians(CAM_HFOV_DEG) / 2.0)
+CAM_VFOV_TAN = math.tan(math.radians(CAM_VFOV_DEG) / 2.0)
 PAN_STEP     = 100 * CAP_K
 ZOOM_STEP    = 0.1
 TAU_PAN    = float(os.environ.get("TAU_PAN",    "0.205"))
@@ -951,6 +957,17 @@ class SharedState:
         self.osd_master = True
         self.osd_zoom = True
         self.gain = [0] * 10
+        self.fcc_tgt = {"valid": False, "nx": 0.0, "ny": 0.0,
+                        "yaw": 0.0, "pitch": 0.0}
+
+    def set_fcc_target(self, valid, nx, ny, yaw, pitch):
+        with self.lock:
+            self.fcc_tgt = {"valid": bool(valid), "nx": nx, "ny": ny,
+                            "yaw": yaw, "pitch": pitch}
+
+    def fcc_target(self):
+        with self.lock:
+            return dict(self.fcc_tgt)
 
     def set_osd_flags(self, master, zoom):
         with self.lock:
@@ -996,6 +1013,11 @@ class SharedState:
             s["track_box"] = self.track_box
             s["track_score"] = self.track_score
             s["pred"] = dict(self.pred)
+            s["fcc"] = {"valid": self.fcc_tgt["valid"],
+                        "nx": round(self.fcc_tgt["nx"], 4),
+                        "ny": round(self.fcc_tgt["ny"], 4),
+                        "yaw_deg": round(self.fcc_tgt["yaw"], 2),
+                        "pitch_deg": round(self.fcc_tgt["pitch"], 2)}
             return s
 
     def begin_frame(self):
@@ -1052,9 +1074,25 @@ state = SharedState()
 rtsp = None
 
 
+def _off_axis_rad(px, half, tan_half):
+    return math.atan((px - half) / half * tan_half)
+
+
+def target_angles(tx, ty, vcx, vcy):
+    hx, hy = CAP_W / 2.0, CAP_H / 2.0
+    yaw = (_off_axis_rad(tx, hx, CAM_HFOV_TAN)
+           - _off_axis_rad(vcx, hx, CAM_HFOV_TAN))
+    pitch = (_off_axis_rad(vcy, hy, CAM_VFOV_TAN)
+             - _off_axis_rad(ty, hy, CAM_VFOV_TAN))
+    return math.degrees(yaw), math.degrees(pitch)
+
+
 def fcc_tx_packet():
+    t = state.fcc_target()
+    on = t["valid"]
     fields = [FCC_TX_HEADER1, FCC_TX_HEADER2,
-              0, 0.0, 0.0, 0, 0.0, 0.0, 0, 0,
+              1 if on else 0, t["nx"], t["ny"], 1 if on else 0,
+              t["yaw"], t["pitch"], 0, 0,
               0, 0, 0, 0, 0, 0] + [0] * 10
     raw = struct.pack(FCC_TX_FMT, *(fields + [0]))
     return raw[:-1] + bytes([sum(raw[:-1]) & 0xFF])
@@ -1230,6 +1268,7 @@ def pipeline():
                 lfc_box, lfc_center, lfc_score, lfc_t = lfc.snapshot()
                 lfc_active = lfc_box is not None
             pred_dx, pred_dy, pred_age = 0.0, 0.0, 0.0
+            tgt = None
 
             ptz.step(TAU_FOLLOW if ((lfc_active or tracker.active
                                      or dtracker.active) and follow) else TAU_PAN)
@@ -1286,6 +1325,7 @@ def pipeline():
                 elif follow:
                     tx, ty = c[0] / PROC_SCALE, c[1] / PROC_SCALE
                     sx, sy = tx, ty
+                    tgt = (tx, ty)
                     m_t = lfc_t if (lfc_active and lfc_t > 0.0) else _now
                     if prev_tgt is None:
                         prev_tgt, prev_tgt_t = (sx, sy), m_t
@@ -1321,6 +1361,17 @@ def pipeline():
                 [sx, 0.0, -sx * x0],
                 [0.0, sy, -sy * y0],
             ], dtype=np.float64)
+
+            if tgt is not None:
+                px, py = apply_pt(M, tgt[0], tgt[1])
+                vcx, vcy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+                state.set_fcc_target(
+                    True,
+                    max(-1.0, min(1.0, (px - OUT_W / 2.0) / (OUT_W / 2.0))),
+                    max(-1.0, min(1.0, (OUT_H / 2.0 - py) / (OUT_H / 2.0))),
+                    *target_angles(tgt[0], tgt[1], vcx, vcy))
+            else:
+                state.set_fcc_target(False, 0.0, 0.0, 0.0, 0.0)
 
             dt = dt_f
             if dt > 0:
