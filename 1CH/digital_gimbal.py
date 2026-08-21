@@ -1116,6 +1116,21 @@ def target_angles(tx, ty, vcx, vcy):
     return math.degrees(yaw), math.degrees(pitch)
 
 
+def _sum8(body):
+    return sum(body) & 0xFF
+
+
+def _xor8(body):
+    x = 0
+    for b in body:
+        x ^= b
+    return x
+
+
+FCC_CHECKSUM = _sum8
+# FCC_CHECKSUM = _xor8
+
+
 def _deg_x10(v):
     return max(-32768, min(32767, int(round(v * 10.0))))
 
@@ -1130,7 +1145,7 @@ def fcc_tx_packet():
               0, _deg_x10(t["pitch"]) if on else 0,
               _deg_x10(t["yaw"]) if on else 0, 0, 0, 0] + [0] * 10
     raw = struct.pack(FCC_TX_FMT, *(fields + [0]))
-    return raw[:-1] + bytes([sum(raw[:-1]) & 0xFF])
+    return raw[:-1] + bytes([FCC_CHECKSUM(raw[:-1])])
 
 
 def fcc_rx_parse(raw):
