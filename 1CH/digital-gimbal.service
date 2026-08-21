@@ -8,6 +8,9 @@ StartLimitBurst=5
 
 [Service]
 Environment=STATUS_FILE=/dev/shm/gimbal-status.json
+Environment=FCC_PORT=/dev/ttyAMA3
+Environment=FCC_BAUD=115200
+Environment=FCC_HZ=50
 Type=simple
 User=gimbal
 Group=gimbal
