@@ -11,6 +11,7 @@ import threading
 import time
 import json
 import struct
+import termios
 
 CAMERA_INDEX = 0
 
@@ -150,6 +151,11 @@ FCC_TX_FMT  = "<BBBffBffbBhhhhhh10bB"
 FCC_TX_SIZE = struct.calcsize(FCC_TX_FMT)
 FCC_RX_FMT  = "<BBfBffddffffffff32sB"
 FCC_RX_SIZE = struct.calcsize(FCC_RX_FMT)
+
+FCC_PORT = os.environ.get("FCC_PORT", "/dev/ttyAMA3")
+FCC_BAUD = int(os.environ.get("FCC_BAUD", "115200"))
+FCC_HZ   = float(os.environ.get("FCC_HZ", "50"))
+FCC_RETRY = float(os.environ.get("FCC_RETRY", "2.0"))
 assert FCC_TX_SIZE == 45, FCC_TX_SIZE
 assert FCC_RX_SIZE == 96, FCC_RX_SIZE
 
@@ -960,7 +966,7 @@ class SharedState:
         self.fcc_tgt = {"valid": False, "nx": 0.0, "ny": 0.0,
                         "yaw": 0.0, "pitch": 0.0}
         self.rotate = (0.0, 0.0)
-        self.center = 0
+        self.center_pending = False
 
     def set_rotate(self, yaw, pitch):
         with self.lock:
@@ -972,11 +978,14 @@ class SharedState:
 
     def set_center(self, value):
         with self.lock:
-            self.center = int(value) & 0xFF
+            self.center_pending = True
 
     def center_cmd(self):
         with self.lock:
-            return self.center
+            if self.center_pending:
+                self.center_pending = False
+                return 1
+            return 0
 
     def set_fcc_target(self, valid, nx, ny, yaw, pitch):
         with self.lock:
@@ -1032,7 +1041,7 @@ class SharedState:
             s["track_score"] = self.track_score
             s["pred"] = dict(self.pred)
             s["rotate"] = list(self.rotate)
-            s["center"] = self.center
+            s["center"] = self.center_pending
             s["fcc"] = {"valid": self.fcc_tgt["valid"],
                         "nx": round(self.fcc_tgt["nx"], 4),
                         "ny": round(self.fcc_tgt["ny"], 4),
@@ -1206,6 +1215,59 @@ def handle_gcs_message(msg):
         raw = struct.unpack_from("<H", msg, p)[0]
         f = min(1.0, raw / GCS_ZOOM_RAW_MAX)
         ptz.set_zoom(MIN_ZOOM + f * (MAX_ZOOM - MIN_ZOOM))
+
+
+def fcc_open(path, baud):
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        speed = getattr(termios, "B%d" % baud)
+        a = termios.tcgetattr(fd)
+        a[0] = 0
+        a[1] = 0
+        a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        a[3] = 0
+        a[4] = speed
+        a[5] = speed
+        cc = list(a[6])
+        cc[termios.VMIN] = 0
+        cc[termios.VTIME] = 0
+        a[6] = cc
+        termios.tcsetattr(fd, termios.TCSANOW, a)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def fcc_loop():
+    period = 1.0 / max(1.0, FCC_HZ)
+    fd = None
+    next_t = time.monotonic()
+    while True:
+        if fd is None:
+            try:
+                fd = fcc_open(FCC_PORT, FCC_BAUD)
+                next_t = time.monotonic()
+            except Exception:
+                time.sleep(FCC_RETRY)
+                continue
+        try:
+            os.write(fd, fcc_tx_packet())
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            fd = None
+            time.sleep(FCC_RETRY)
+            continue
+        next_t += period
+        d = next_t - time.monotonic()
+        if d > 0:
+            time.sleep(d)
+        else:
+            next_t = time.monotonic()
 
 
 def gcs_loop():
@@ -1491,6 +1553,7 @@ def main():
         rtsp = None
 
     threading.Thread(target=gcs_loop, daemon=True).start()
+    threading.Thread(target=fcc_loop, daemon=True).start()
     pipeline()
 
 
