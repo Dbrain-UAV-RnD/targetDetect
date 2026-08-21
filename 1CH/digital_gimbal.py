@@ -959,6 +959,24 @@ class SharedState:
         self.gain = [0] * 10
         self.fcc_tgt = {"valid": False, "nx": 0.0, "ny": 0.0,
                         "yaw": 0.0, "pitch": 0.0}
+        self.rotate = (0.0, 0.0)
+        self.center = 0
+
+    def set_rotate(self, yaw, pitch):
+        with self.lock:
+            self.rotate = (float(yaw), float(pitch))
+
+    def rotate_cmd(self):
+        with self.lock:
+            return self.rotate
+
+    def set_center(self, value):
+        with self.lock:
+            self.center = int(value) & 0xFF
+
+    def center_cmd(self):
+        with self.lock:
+            return self.center
 
     def set_fcc_target(self, valid, nx, ny, yaw, pitch):
         with self.lock:
@@ -1013,6 +1031,8 @@ class SharedState:
             s["track_box"] = self.track_box
             s["track_score"] = self.track_score
             s["pred"] = dict(self.pred)
+            s["rotate"] = list(self.rotate)
+            s["center"] = self.center
             s["fcc"] = {"valid": self.fcc_tgt["valid"],
                         "nx": round(self.fcc_tgt["nx"], 4),
                         "ny": round(self.fcc_tgt["ny"], 4),
@@ -1087,13 +1107,19 @@ def target_angles(tx, ty, vcx, vcy):
     return math.degrees(yaw), math.degrees(pitch)
 
 
+def _deg_x10(v):
+    return max(-32768, min(32767, int(round(v * 10.0))))
+
+
 def fcc_tx_packet():
     t = state.fcc_target()
     on = t["valid"]
+    xm, ym = state.rotate_cmd()
     fields = [FCC_TX_HEADER1, FCC_TX_HEADER2,
               1 if on else 0, t["nx"], t["ny"], 1 if on else 0,
-              t["yaw"], t["pitch"], 0, 0,
-              0, 0, 0, 0, 0, 0] + [0] * 10
+              xm, ym, 0, state.center_cmd(),
+              0, _deg_x10(t["pitch"]) if on else 0,
+              _deg_x10(t["yaw"]) if on else 0, 0, 0, 0] + [0] * 10
     raw = struct.pack(FCC_TX_FMT, *(fields + [0]))
     return raw[:-1] + bytes([sum(raw[:-1]) & 0xFF])
 
@@ -1157,7 +1183,10 @@ def handle_gcs_message(msg):
     elif cmd == CMD_TRACK_ACTION:
         gcs_track_action(msg)
 
-    elif cmd in (CMD_GIMBAL_ROTATE, CMD_DIGITAL_TILT):
+    elif cmd == CMD_GIMBAL_ROTATE:
+        state.set_rotate(_s8(msg[p]), _s8(msg[p + 1]))
+
+    elif cmd == CMD_DIGITAL_TILT:
         yaw = _s8(msg[p]) / GCS_ROTATE_FULL_SCALE
         pitch = _s8(msg[p + 1]) / GCS_ROTATE_FULL_SCALE
         if yaw or pitch:
@@ -1165,9 +1194,7 @@ def handle_gcs_message(msg):
             ptz.pan(yaw * GCS_ROTATE_STEP_PX, -pitch * GCS_ROTATE_STEP_PX)
 
     elif cmd == CMD_GIMBAL_CENTER:
-        if msg[p]:
-            state.request_clear()
-            ptz.recenter()
+        state.set_center(msg[p])
 
     elif cmd == CMD_SET_GAIN:
         state.set_gain([_s8(b) for b in msg[p:p + 10]])
