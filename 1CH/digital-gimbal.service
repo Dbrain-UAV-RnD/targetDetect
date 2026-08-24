@@ -11,6 +11,15 @@ Environment=STATUS_FILE=/dev/shm/gimbal-status.json
 Environment=FCC_PORT=/dev/ttyAMA3
 Environment=FCC_BAUD=115200
 Environment=FCC_HZ=50
+Environment=CAM_BACKEND=v4l2
+Environment=RTSP_FPS=24
+Environment=OUT_W=1920
+Environment=OUT_H=1080
+Environment=LFC_RATE=24
+Environment=RTSP_BITRATE=2500
+Environment=RTSP_PRESET=veryfast
+Environment=RTSP_CODEC=h264
+Environment=RTSP_X265_OPTS=no-rect=1:no-amp=1:wpp=1:pmode=1:pme=1:frame-threads=4:rd=1:me=0:subme=0
 Type=simple
 User=gimbal
 Group=gimbal

@@ -15,15 +15,20 @@ import termios
 
 CAMERA_INDEX = 0
 
-CAP_W = int(os.environ.get("CAP_W", "2304"))
-CAP_H = int(os.environ.get("CAP_H", "1296"))
-OUT_W = int(os.environ.get("OUT_W", "1280"))
-OUT_H = int(os.environ.get("OUT_H", "720"))
-FPS          = int(os.environ.get("FPS", "24"))
+CAP_W = int(os.environ.get("CAP_W", "1920"))
+CAP_H = int(os.environ.get("CAP_H", "1080"))
+OUT_W = int(os.environ.get("OUT_W", "1920"))
+OUT_H = int(os.environ.get("OUT_H", "1080"))
+FPS          = int(os.environ.get("FPS", "60"))
 ROTATION     = 0
 
-SENSOR_W = int(os.environ.get("SENSOR_W", "2304"))
-SENSOR_H = int(os.environ.get("SENSOR_H", "1296"))
+SENSOR_W = int(os.environ.get("SENSOR_W", "1920"))
+SENSOR_H = int(os.environ.get("SENSOR_H", "1080"))
+
+CAM_BACKEND  = os.environ.get("CAM_BACKEND", "auto")
+V4L2_FOURCC  = os.environ.get("V4L2_FOURCC", "MJPG")
+V4L2_BUFFERS = int(os.environ.get("V4L2_BUFFERS", "3"))
+V4L2_TIMEOUT = float(os.environ.get("V4L2_TIMEOUT", "2.0"))
 
 PROC_W, PROC_H = 480, 270
 PROC_SCALE = PROC_W / float(CAP_W)
@@ -44,8 +49,8 @@ MAX_ZOOM     = float(os.environ.get("MAX_ZOOM", "5.0"))
 REAL_ZOOM    = CAP_W / OUT_W
 CAP_K        = CAP_W / 1920.0
 
-CAM_HFOV_DEG = float(os.environ.get("CAM_HFOV_DEG", "66.0"))
-CAM_VFOV_DEG = float(os.environ.get("CAM_VFOV_DEG", "41.0"))
+CAM_HFOV_DEG = float(os.environ.get("CAM_HFOV_DEG", "35.5"))
+CAM_VFOV_DEG = float(os.environ.get("CAM_VFOV_DEG", "20.41"))
 CAM_HFOV_TAN = math.tan(math.radians(CAM_HFOV_DEG) / 2.0)
 CAM_VFOV_TAN = math.tan(math.radians(CAM_VFOV_DEG) / 2.0)
 PAN_STEP     = 100 * CAP_K
@@ -67,15 +72,6 @@ TRK_MIN_DIST    = 4
 TRK_MIN_POINTS  = 3
 TRK_FB_MAX_ERR  = 1.0
 
-HEF_PATHS = ["/usr/share/hailo-models/yolov8s_h8.hef",
-             "/usr/share/hailo-models/yolov8s_h8l.hef"]
-DET_SIZE        = 640
-DET_SCORE       = 0.40
-DET_MATCH_IOU   = 0.20
-DET_MAX_MISS    = 20
-DET_CLICK_PAD   = 0.15
-USE_DETECTOR    = False
-
 LFC_HEF   = "/home/gimbal/models/lightfc_backbone.hef"
 LFC_HEAD  = "/home/gimbal/models/lightfc_head.onnx"
 LFC_HEAD_FRONT = "/home/gimbal/models/split/A_front.onnx"
@@ -88,7 +84,7 @@ LFC_HEAD_THREADS = int(os.environ.get("LFC_THREADS", "2"))
 LFC_MAX_RATE = float(os.environ.get("LFC_RATE", str(FPS)))
 LFC_SCORE_MIN = 0.60
 LFC_SIZE_ALPHA = float(os.environ.get("LFC_SIZE_ALPHA", "0.0"))
-LFC_TPL_ALPHA = float(os.environ.get("LFC_TPL_ALPHA", "0.15"))
+LFC_TPL_ALPHA = float(os.environ.get("LFC_TPL_ALPHA", "0.0"))
 LFC_TPL_MIN   = float(os.environ.get("LFC_TPL_MIN", "0.75"))
 LFC_MAX_MISS_SEC = float(os.environ.get("LFC_MISS_SEC", "5.6"))
 ORT_SPINNING = os.environ.get("ORT_SPINNING", "0") not in ("0", "false", "no")
@@ -100,6 +96,15 @@ STATUS_EVERY = int(os.environ.get("STATUS_EVERY", str(FPS)))
 LFC_DUMP_N   = int(os.environ.get("LFC_DUMP_N", "256"))
 LFC_DUMP_EVERY = int(os.environ.get("LFC_DUMP_EVERY", "3"))
 LFC_INIT_BOX  = 90 * CAP_K
+LFC_STAB_DEAD = float(os.environ.get("LFC_STAB_DEAD", "4.0")) * CAP_K
+LFC_STAB_SPAN = float(os.environ.get("LFC_STAB_SPAN", "14.0")) * CAP_K
+LFC_STAB_MIN  = float(os.environ.get("LFC_STAB_MIN",  "0.12"))
+LFC_SCALE_LR     = float(os.environ.get("LFC_SCALE_LR",     "0.40"))
+LFC_SCALE_RATE   = float(os.environ.get("LFC_SCALE_RATE",   "1.05"))
+LFC_SCALE_HOLD   = float(os.environ.get("LFC_SCALE_HOLD",   "1.005"))
+LFC_SCALE_SCORE  = float(os.environ.get("LFC_SCALE_SCORE",  "0.70"))
+LFC_SCALE_MIN_PX = float(os.environ.get("LFC_SCALE_MIN_PX", "16")) * CAP_K
+LFC_SCALE_MAX_PX = float(os.environ.get("LFC_SCALE_MAX_PX", "0.75")) * CAP_H
 LFC_IN_Z  = "lightfc_backbone_scope1/input_layer1"
 LFC_IN_X  = "lightfc_backbone_scope2/input_layer2"
 LFC_OUT_Z = "lightfc_backbone_scope1/conv26"
@@ -109,9 +114,14 @@ LFC_OUT_X = "lightfc_backbone_scope2/conv52"
 RTSP_PORT    = int(os.environ.get("RTSP_PORT", "554"))
 RTSP_PATH    = "/video0"
 RTSP_QUEUE   = 3
-RTSP_BITRATE = int(os.environ.get("RTSP_BITRATE", "2500"))
+RTSP_BITRATE = int(os.environ.get("RTSP_BITRATE", "1200"))
 RTSP_PRESET  = os.environ.get("RTSP_PRESET", "veryfast")
-RTSP_GOP     = int(os.environ.get("RTSP_GOP", str(FPS * 2)))
+RTSP_CODEC   = os.environ.get("RTSP_CODEC", "h264").lower()
+RTSP_X265_OPTS = os.environ.get(
+    "RTSP_X265_OPTS",
+    "no-rect=1:no-amp=1:wpp=1:pmode=1:pme=1:frame-threads=4:rd=1:me=0:subme=0")
+RTSP_FPS     = int(os.environ.get("RTSP_FPS", "30"))
+RTSP_GOP     = int(os.environ.get("RTSP_GOP", str(RTSP_FPS * 2)))
 RTSP_VBV     = int(os.environ.get("RTSP_VBV", "300"))
 RTSP_INTRA_REFRESH = os.environ.get("RTSP_INTRA_REFRESH", "1") not in ("0", "false", "no")
 
@@ -191,7 +201,7 @@ def apply_pt(m, x, y):
             m[1, 0] * x + m[1, 1] * y + m[1, 2])
 
 
-class Camera:
+class CameraCSI:
 
     def __init__(self, index, width, height, fps):
         from picamera2 import Picamera2
@@ -254,6 +264,81 @@ class Camera:
             self.picam2.close()
         except Exception:
             pass
+
+
+class CameraV4L2:
+
+    def __init__(self, index, width, height, fps):
+        self.width = width
+        self.height = height
+        self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        if not self.cap.isOpened():
+            raise RuntimeError("v4l2 open failed: %s" % index)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*V4L2_FOURCC))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap.set(cv2.CAP_PROP_FPS, fps)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, V4L2_BUFFERS)
+        self.crop_now = (0, 0, width, height)
+        self.sensor_dt_ms = 0.0
+        self._prev_ts = None
+        self._cv = threading.Condition()
+        self._frame = None
+        self._seq = 0
+        self._taken = 0
+        self._alive = True
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
+
+    def _reader(self):
+        while self._alive:
+            ok, bgr = self.cap.read()
+            if not ok or bgr is None:
+                with self._cv:
+                    self._alive = False
+                    self._cv.notify_all()
+                return
+            if ROTATION == 180:
+                bgr = cv2.flip(bgr, -1)
+            now = time.monotonic()
+            with self._cv:
+                if self._prev_ts is not None:
+                    self.sensor_dt_ms = (now - self._prev_ts) * 1e3
+                self._prev_ts = now
+                self._frame = bgr
+                self._seq += 1
+                self._cv.notify_all()
+
+    def read(self):
+        with self._cv:
+            while self._alive and self._seq == self._taken:
+                if not self._cv.wait(timeout=V4L2_TIMEOUT):
+                    return None, None, None
+            if not self._alive or self._frame is None:
+                return None, None, None
+            self._taken = self._seq
+            bgr = self._frame
+        proc = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY),
+                          (PROC_W, PROC_H), interpolation=cv2.INTER_AREA)
+        return bgr, proc, self.crop_now
+
+    def release(self):
+        self._alive = False
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+
+def Camera(index, width, height, fps):
+    if CAM_BACKEND == "v4l2":
+        return CameraV4L2(index, width, height, fps)
+    if CAM_BACKEND == "csi":
+        return CameraCSI(index, width, height, fps)
+    try:
+        return CameraCSI(index, width, height, fps)
+    except Exception:
+        return CameraV4L2(index, width, height, fps)
 
 
 class LightFCTracker:
@@ -321,6 +406,7 @@ class LightFCTracker:
         self.feat_sz = n
 
         self.box = None
+        self.sbox = None
         self.z = None
         self.score = 0.0
         self.miss_t0 = None
@@ -347,6 +433,7 @@ class LightFCTracker:
     def stop(self):
         with self.lock:
             self.box = None
+            self.sbox = None
             self.z = None
             self.score = 0.0
             self.miss_t0 = None
@@ -387,10 +474,29 @@ class LightFCTracker:
 
     def snapshot(self):
         with self.lock:
-            if self.box is None:
+            if self.sbox is None:
                 return None, None, 0.0, 0.0
-            x, y, w, h = self.box
-            return self.box, (x + 0.5 * w, y + 0.5 * h), self.score, self.t_result
+            x, y, w, h = self.sbox
+            return self.sbox, (x + 0.5 * w, y + 0.5 * h), self.score, self.t_result
+
+    @staticmethod
+    def _stab(prev, new):
+        if prev is None:
+            return new
+        px, py, pw, ph = prev
+        nx, ny, nw, nh = new
+        pcx, pcy = px + 0.5 * pw, py + 0.5 * ph
+        ncx, ncy = nx + 0.5 * nw, ny + 0.5 * nh
+        dx, dy = ncx - pcx, ncy - pcy
+        d = math.hypot(dx, dy)
+        if d <= LFC_STAB_DEAD:
+            a = 0.0
+        else:
+            a = min(1.0, max(LFC_STAB_MIN,
+                             (d - LFC_STAB_DEAD) / max(1e-6, LFC_STAB_SPAN)))
+        w = pw + a * (nw - pw)
+        h = ph + a * (nh - ph)
+        return (pcx + a * dx - 0.5 * w, pcy + a * dy - 0.5 * h, w, h)
 
     def _loop(self):
         while True:
@@ -458,20 +564,16 @@ class LightFCTracker:
         with self.lock:
             self.z = z[None]
             self.box = tuple(float(v) for v in box)
+            self.sbox = self.box
             self.score = 1.0
             self.miss_t0 = None
             self.t_result = time.time()
         return True
 
-    def _update(self, bgr):
-        with self.lock:
-            if self.box is None:
-                return None
-            cur_box, cur_z = self.box, self.z
+    def _infer(self, bgr, cur_box, cur_z):
         _t0 = time.perf_counter()
         x_patch, rf = self._crop(bgr, cur_box, LFC_SEARCH_FACTOR, LFC_SEARCH)
         if x_patch is None:
-            self.stop()
             return None
         x_patch = cv2.cvtColor(x_patch, cv2.COLOR_BGR2RGB)
         _t1 = time.perf_counter()
@@ -512,6 +614,52 @@ class LightFCTracker:
         resp = score[0, 0] * self.hann
         iy, ix = np.unravel_index(int(np.argmax(resp)), resp.shape)
         peak = float(score[0, 0, iy, ix])
+
+        ox, oy = offset[0, 0, iy, ix], offset[0, 1, iy, ix]
+        bw, bh = size[0, 0, iy, ix], size[0, 1, iy, ix]
+        cx = (ix + ox) / self.feat_sz * LFC_SEARCH / rf
+        cy = (iy + oy) / self.feat_sz * LFC_SEARCH / rf
+        w = bw * LFC_SEARCH / rf
+        h = bh * LFC_SEARCH / rf
+
+        px, py, pw, ph = cur_box
+        raw_wh = (float(w), float(h))
+        w = pw + LFC_SIZE_ALPHA * (w - pw)
+        h = ph + LFC_SIZE_ALPHA * (h - ph)
+        half = 0.5 * LFC_SEARCH / rf
+        rcx = cx + (px + 0.5 * pw - half)
+        rcy = cy + (py + 0.5 * ph - half)
+        nx = min(max(rcx - 0.5 * w, -w + 2), CAP_W - 2)
+        ny = min(max(rcy - 0.5 * h, -h + 2), CAP_H - 2)
+        return (peak, (float(nx), float(ny), float(max(4.0, w)),
+                       float(max(4.0, h))), raw_wh)
+
+    def _update(self, bgr):
+        with self.lock:
+            if self.box is None:
+                return None
+            cur_box, cur_z = self.box, self.z
+
+        r0 = self._infer(bgr, cur_box, cur_z)
+        if r0 is None:
+            self.stop()
+            return None
+        peak, new_box, raw_wh = r0
+
+        moving = False
+        if LFC_SCALE_LR > 0.0 and peak >= LFC_SCALE_SCORE:
+            pw, ph = cur_box[2], cur_box[3]
+            hint = math.sqrt(raw_wh[0] * raw_wh[1] / (pw * ph)) if pw * ph > 0 else 1.0
+            f = min(LFC_SCALE_RATE, max(1.0 / LFC_SCALE_RATE,
+                                        1.0 + LFC_SCALE_LR * (hint - 1.0)))
+            k = math.sqrt(pw * ph) * f
+            if LFC_SCALE_MIN_PX <= k <= LFC_SCALE_MAX_PX:
+                bx, by, bw2, bh2 = new_box
+                nw, nh = pw * f, ph * f
+                new_box = (bx + 0.5 * bw2 - 0.5 * nw,
+                           by + 0.5 * bh2 - 0.5 * nh, nw, nh)
+                moving = f > LFC_SCALE_HOLD or f < 1.0 / LFC_SCALE_HOLD
+
         with self.lock:
             self.score = peak
 
@@ -525,29 +673,12 @@ class LightFCTracker:
             return None
         with self.lock:
             self.miss_t0 = None
-
-        ox, oy = offset[0, 0, iy, ix], offset[0, 1, iy, ix]
-        bw, bh = size[0, 0, iy, ix], size[0, 1, iy, ix]
-        cx = (ix + ox) / self.feat_sz * LFC_SEARCH / rf
-        cy = (iy + oy) / self.feat_sz * LFC_SEARCH / rf
-        w = bw * LFC_SEARCH / rf
-        h = bh * LFC_SEARCH / rf
-
-        px, py, pw, ph = cur_box
-        w = pw + LFC_SIZE_ALPHA * (w - pw)
-        h = ph + LFC_SIZE_ALPHA * (h - ph)
-        half = 0.5 * LFC_SEARCH / rf
-        rcx = cx + (px + 0.5 * pw - half)
-        rcy = cy + (py + 0.5 * ph - half)
-        nx = min(max(rcx - 0.5 * w, -w + 2), CAP_W - 2)
-        ny = min(max(rcy - 0.5 * h, -h + 2), CAP_H - 2)
-        new_box = (nx, ny, max(4.0, w), max(4.0, h))
-        with self.lock:
             if self.box is not None:
                 self.box = new_box
+                self.sbox = self._stab(self.sbox, new_box)
                 self.t_result = time.time()
 
-        if LFC_TPL_ALPHA > 0.0 and peak >= LFC_TPL_MIN:
+        if LFC_TPL_ALPHA > 0.0 and peak >= LFC_TPL_MIN and not moving:
             nz, _ = self._crop(bgr, new_box, LFC_TEMPLATE_FACTOR, LFC_TEMPLATE)
             if nz is not None:
                 nz = cv2.cvtColor(nz, cv2.COLOR_BGR2RGB).astype(np.float32)
@@ -557,154 +688,6 @@ class LightFCTracker:
                             self.z.astype(np.float32) * (1.0 - LFC_TPL_ALPHA)
                             + nz[None] * LFC_TPL_ALPHA, 0.0, 255.0).astype(np.uint8)
         return None
-
-
-class HailoDetector:
-
-    def __init__(self):
-        from hailo_platform import (HEF, VDevice, ConfigureParams,
-                                    HailoStreamInterface, InputVStreamParams,
-                                    OutputVStreamParams, FormatType, InferVStreams)
-        last_err = None
-        for path in HEF_PATHS:
-            try:
-                hef = HEF(path)
-                self.vdev = VDevice()
-                self.ng = self.vdev.configure(
-                    hef, ConfigureParams.create_from_hef(
-                        hef, interface=HailoStreamInterface.PCIe))[0]
-                self.in_name = hef.get_input_vstream_infos()[0].name
-                self.out_name = hef.get_output_vstream_infos()[0].name
-                self.pipe = InferVStreams(
-                    self.ng,
-                    InputVStreamParams.make(self.ng, format_type=FormatType.UINT8),
-                    OutputVStreamParams.make(self.ng, format_type=FormatType.FLOAT32))
-                self.pipe.__enter__()
-                self.act = self.ng.activate()
-                self.act.__enter__()
-                break
-            except Exception as e:
-                last_err = e
-                self.pipe = None
-        else:
-            raise RuntimeError(last_err)
-
-        self.lock = threading.Lock()
-        self.pending = None
-        self.dets = []
-        self.ms = 0.0
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    @staticmethod
-    def _letterbox(bgr):
-        h, w = bgr.shape[:2]
-        s = min(DET_SIZE / w, DET_SIZE / h)
-        nw, nh = int(round(w * s)), int(round(h * s))
-        out = np.full((DET_SIZE, DET_SIZE, 3), 114, np.uint8)
-        ox, oy = (DET_SIZE - nw) // 2, (DET_SIZE - nh) // 2
-        out[oy:oy + nh, ox:ox + nw] = cv2.resize(bgr, (nw, nh))
-        return out, s, ox, oy
-
-    def submit(self, bgr):
-        with self.lock:
-            self.pending = bgr
-
-    def latest(self):
-        with self.lock:
-            return self.dets, self.ms
-
-    def _loop(self):
-        while True:
-            with self.lock:
-                frame, self.pending = self.pending, None
-            if frame is None:
-                time.sleep(0.003)
-                continue
-            try:
-                t0 = time.time()
-                lb, s, ox, oy = self._letterbox(frame)
-                rgb = cv2.cvtColor(lb, cv2.COLOR_BGR2RGB)
-                res = self.pipe.infer({self.in_name: np.expand_dims(rgb, 0)})
-                raw = res[self.out_name][0]
-                dets = []
-                for cls, arr in enumerate(raw):
-                    a = np.asarray(arr).reshape(-1, 5)
-                    for ymin, xmin, ymax, xmax, score in a[a[:, 4] >= DET_SCORE]:
-                        x1 = (xmin * DET_SIZE - ox) / s
-                        y1 = (ymin * DET_SIZE - oy) / s
-                        x2 = (xmax * DET_SIZE - ox) / s
-                        y2 = (ymax * DET_SIZE - oy) / s
-                        dets.append((cls, float(score), x1, y1, x2, y2))
-                with self.lock:
-                    self.dets = dets
-                    self.ms = (time.time() - t0) * 1000.0
-            except Exception as e:
-                time.sleep(0.05)
-
-
-def iou(a, b):
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
-    inter = ix * iy
-    ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
-    return inter / ua if ua > 0 else 0.0
-
-
-class DetectionTracker:
-
-    def __init__(self):
-        self.box = None
-        self.cls = None
-        self.miss = 0
-
-    @property
-    def active(self):
-        return self.box is not None
-
-    def stop(self):
-        self.box = None
-        self.cls = None
-        self.miss = 0
-
-    def start(self, dets, x, y):
-        best = None
-        for cls, score, x1, y1, x2, y2 in dets:
-            px, py = (x2 - x1) * DET_CLICK_PAD, (y2 - y1) * DET_CLICK_PAD
-            if x1 - px <= x <= x2 + px and y1 - py <= y <= y2 + py:
-                area = (x2 - x1) * (y2 - y1)
-                if best is None or area < best[0]:
-                    best = (area, cls, (x1, y1, x2, y2))
-        if best is None:
-            return False
-        _, self.cls, self.box = best
-        self.miss = 0
-        return True
-
-    def update(self, dets):
-        best, best_iou = None, DET_MATCH_IOU
-        for cls, score, x1, y1, x2, y2 in dets:
-            if cls != self.cls:
-                continue
-            v = iou(self.box, (x1, y1, x2, y2))
-            if v >= best_iou:
-                best, best_iou = (x1, y1, x2, y2), v
-        if best is None:
-            self.miss += 1
-            if self.miss > DET_MAX_MISS:
-                self.stop()
-                return None
-            return self.center()
-        self.box = best
-        self.miss = 0
-        return self.center()
-
-    def center(self):
-        if self.box is None:
-            return None
-        x1, y1, x2, y2 = self.box
-        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
 
 class TargetTracker:
@@ -886,18 +869,26 @@ class RtspServer:
         self.lock = threading.Lock()
         self.src = None
         self.clients = 0
-        self.duration = Gst.SECOND // FPS
+        self.duration = Gst.SECOND // RTSP_FPS
+
+        if RTSP_CODEC == "h265":
+            enc = (f"x265enc tune=zerolatency speed-preset={RTSP_PRESET} "
+                   f"bitrate={RTSP_BITRATE} key-int-max={RTSP_GOP} "
+                   f"option-string={RTSP_X265_OPTS} "
+                   "! rtph265pay name=pay0 pt=96 config-interval=1")
+        else:
+            enc = (f"x264enc tune=zerolatency speed-preset={RTSP_PRESET} "
+                   f"bitrate={RTSP_BITRATE} key-int-max={RTSP_GOP} "
+                   f"vbv-buf-capacity={RTSP_VBV} "
+                   f"intra-refresh={'true' if RTSP_INTRA_REFRESH else 'false'} "
+                   "! rtph264pay name=pay0 pt=96 config-interval=1")
 
         launch = (
             "appsrc name=src is-live=true format=time do-timestamp=true "
             f"block=false max-bytes=0 max-buffers={RTSP_QUEUE} leaky-type=downstream "
-            f"caps=video/x-raw,format=BGR,width={OUT_W},height={OUT_H},framerate={FPS}/1 "
+            f"caps=video/x-raw,format=BGR,width={OUT_W},height={OUT_H},framerate={RTSP_FPS}/1 "
             "! videoconvert ! video/x-raw,format=I420 "
-            f"! x264enc tune=zerolatency speed-preset={RTSP_PRESET} "
-            f"bitrate={RTSP_BITRATE} key-int-max={RTSP_GOP} "
-            f"vbv-buf-capacity={RTSP_VBV} "
-            f"intra-refresh={'true' if RTSP_INTRA_REFRESH else 'false'} "
-            "! rtph264pay name=pay0 pt=96 config-interval=1"
+            f"! {enc}"
         )
 
         factory = GstRtspServer.RTSPMediaFactory()
@@ -940,7 +931,9 @@ class RtspServer:
     def info(self):
         with self.lock:
             return {"on": True, "clients": self.clients,
-                    "port": self.port, "path": self.path}
+                    "port": self.port, "path": self.path,
+                    "codec": RTSP_CODEC, "fps": RTSP_FPS,
+                    "bitrate": RTSP_BITRATE, "size": [OUT_W, OUT_H]}
 
 
 class SharedState:
@@ -1080,15 +1073,15 @@ class SharedState:
                          "vx": round(vx, 1), "vy": round(vy, 1),
                          "on": PRED_ENABLE}
 
-    def set_det_info(self, on, n, ms, mode, boxes=None):
+    def set_det_info(self, ms, mode):
         with self.lock:
-            self.det_info = {"on": on, "n": n, "ms": round(ms, 1), "mode": mode,
-                             "boxes": boxes or []}
+            self.det_info = {"ms": round(ms, 1), "mode": mode}
 
-    def publish_frame(self, frame_id, inv, fps, crop, zoom, jitter=None):
+    def publish_frame(self, frame_id, inv, fps, crop, zoom, tx=0.0, jitter=None):
         with self.lock:
             self.inv_hist.append((frame_id, inv))
             self.stats["fps"] = round(fps, 1)
+            self.stats["tx_fps"] = round(tx, 1)
             self.stats["crop"] = list(crop) if crop else None
             self.stats["zoom"] = round(zoom, 3)
             if jitter:
@@ -1324,14 +1317,6 @@ def pipeline():
     cam = Camera(CAMERA_INDEX, CAP_W, CAP_H, FPS)
     CAMERA_REF["cam"] = cam
     tracker = TargetTracker()
-    dtracker = DetectionTracker()
-    dets, det_ms = [], 0.0
-    detector = None
-    if USE_DETECTOR:
-        try:
-            detector = HailoDetector()
-        except Exception as e:
-            pass
     try:
         lfc = LightFCTracker()
         LFC_REF["lfc"] = lfc
@@ -1346,6 +1331,10 @@ def pipeline():
     prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
     frame_id = 0
     lfc_box, lfc_center, lfc_score, lfc_t = None, None, 0.0, 0.0
+    rtsp_period = 1.0 / max(1, RTSP_FPS)
+    rtsp_next = 0.0
+    tx_hist = collections.deque(maxlen=max(8, RTSP_FPS * 2 + 1))
+    tx_fps = 0.0
 
     try:
         while True:
@@ -1360,12 +1349,8 @@ def pipeline():
                 os._exit(1)
 
             follow, click, clear = state.begin_frame()
-            show_dets = state.show_dets()
             frame_id += 1
 
-            if detector is not None:
-                detector.submit(bgr)
-                dets, det_ms = detector.latest()
             lfc_active = False
             if lfc is not None:
                 lfc.submit(bgr)
@@ -1374,14 +1359,13 @@ def pipeline():
             pred_dx, pred_dy, pred_age = 0.0, 0.0, 0.0
             tgt = None
 
-            ptz.step(TAU_FOLLOW if ((lfc_active or tracker.active
-                                     or dtracker.active) and follow) else TAU_PAN)
+            ptz.step(TAU_FOLLOW if ((lfc_active or tracker.active) and follow)
+                     else TAU_PAN)
             if settle > 0:
                 settle -= 1
 
             if clear:
                 tracker.stop()
-                dtracker.stop()
                 if lfc is not None: lfc.stop()
                 follow = False
                 prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
@@ -1391,7 +1375,6 @@ def pipeline():
                 capx, capy = apply_pt(inv, click[0], click[1])
                 prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
                 tracker.stop()
-                dtracker.stop()
                 if lfc is not None:
                     lfc.stop()
                 if click[3]:
@@ -1413,13 +1396,10 @@ def pipeline():
                     follow = False
                     state.set_follow(False)
 
-            if lfc_active or dtracker.active or tracker.active:
+            if lfc_active or tracker.active:
                 if lfc_active:
                     c = (lfc_center[0] * PROC_SCALE,
                          lfc_center[1] * PROC_SCALE) if lfc_center else None
-                elif dtracker.active:
-                    cc = dtracker.update(dets)
-                    c = (cc[0] * PROC_SCALE, cc[1] * PROC_SCALE) if cc else None
                 else:
                     c = tracker.update(proc)
                 if c is None:
@@ -1456,8 +1436,20 @@ def pipeline():
             y0 = max(0, int(math.floor(y0f)))
             x1 = min(CAP_W, int(math.ceil(x0f + win_w)))
             y1 = min(CAP_H, int(math.ceil(y0f + win_h)))
-            interp = cv2.INTER_AREA if (x1 - x0) > OUT_W else cv2.INTER_CUBIC
-            out = cv2.resize(bgr[y0:y1, x0:x1], (OUT_W, OUT_H), interpolation=interp)
+            push_now = rtsp is not None and _now >= rtsp_next
+            if push_now:
+                rtsp_next = max(_now - rtsp_period, rtsp_next) + rtsp_period
+                tx_hist.append(_now)
+            if len(tx_hist) > 1 and tx_hist[-1] > tx_hist[0]:
+                tx_fps = (len(tx_hist) - 1) / (tx_hist[-1] - tx_hist[0])
+
+            if not push_now:
+                out = None
+            elif (x1 - x0) == OUT_W and (y1 - y0) == OUT_H:
+                out = bgr[y0:y1, x0:x1].copy()
+            else:
+                interp = cv2.INTER_AREA if (x1 - x0) > OUT_W else cv2.INTER_CUBIC
+                out = cv2.resize(bgr[y0:y1, x0:x1], (OUT_W, OUT_H), interpolation=interp)
 
             sx = OUT_W / float(x1 - x0)
             sy = OUT_H / float(y1 - y0)
@@ -1487,21 +1479,15 @@ def pipeline():
 
             _, _, zoom = ptz.state()
             osd_master, osd_zoom = state.osd_flags()
-            if osd_master:
-                label = f"{fps_ema:4.1f}fps"
+            if out is not None and osd_master:
+                label = f"{tx_fps:4.1f}fps"
                 if osd_zoom:
                     label += f"  ZOOM:{zoom:.2f}x"
                 cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 0, 0), 3, cv2.LINE_AA)
                 cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 255, 128), 1, cv2.LINE_AA)
-            if show_dets:
-                for _c, _s, bx1, by1, bx2, by2 in dets:
-                    p1 = apply_pt(M, bx1, by1)
-                    p2 = apply_pt(M, bx2, by2)
-                    cv2.rectangle(out, (int(p1[0]), int(p1[1])),
-                                  (int(p2[0]), int(p2[1])), (0, 190, 90), 1, cv2.LINE_AA)
-            if lfc_box is not None:
+            if out is not None and lfc_box is not None:
                 bx, by, bw, bh = lfc_box
                 bx += pred_dx
                 by += pred_dy
@@ -1510,34 +1496,21 @@ def pipeline():
                 col = (0, 255, 255) if lfc_score >= LFC_SCORE_MIN else (0, 140, 255)
                 cv2.rectangle(out, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
                               col, 2, cv2.LINE_AA)
-            elif dtracker.active and dtracker.box is not None:
-                x1, y1, x2, y2 = dtracker.box
-                a = apply_pt(M, x1, y1)
-                b = apply_pt(M, x2, y2)
-                cv2.rectangle(out, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
-                              (0, 255, 255), 2, cv2.LINE_AA)
-                cc = dtracker.center()
-                oc = apply_pt(M, cc[0], cc[1])
-                cv2.circle(out, (int(oc[0]), int(oc[1])), 4, (0, 255, 255), -1, cv2.LINE_AA)
-            elif tracker.active and tracker.center is not None:
+            elif out is not None and tracker.active and tracker.center is not None:
                 tx, ty = tracker.center[0] / PROC_SCALE, tracker.center[1] / PROC_SCALE
                 ox, oy = apply_pt(M, tx, ty)
                 cv2.circle(out, (int(ox), int(oy)), 18, (0, 255, 255), 2, cv2.LINE_AA)
 
-            state.set_det_info(detector is not None, len(dets),
-                               (lfc.ms if lfc is not None else det_ms),
+            state.set_det_info(lfc.ms if lfc is not None else 0.0,
                                ("lightfc" if lfc_active else
-                                "detect" if dtracker.active else
-                                "lk" if tracker.active else "none"),
-                               [[c, round(sc, 2), int(a), int(b), int(x), int(y)]
-                                for c, sc, a, b, x, y in dets[:12]])
+                                "lk" if tracker.active else "none"))
             state.set_track_box(lfc_box, lfc_score)
             state.set_pred(pred_age, pred_dx, pred_dy, tvx, tvy)
             state.publish_frame(frame_id, cv2.invertAffineTransform(M),
-                                fps_ema, crop, zoom,
+                                fps_ema, crop, zoom, tx_fps,
                                 frame_jitter(jit) if frame_id % 15 == 0 else None)
 
-            if rtsp is not None:
+            if out is not None:
                 rtsp.push(out)
             if STATUS_FILE and frame_id % STATUS_EVERY == 0:
                 try:
