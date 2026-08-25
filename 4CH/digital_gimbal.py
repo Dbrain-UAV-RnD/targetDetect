@@ -965,8 +965,14 @@ class SharedState:
             return self.osd_master, self.osd_zoom
 
     def set_gain(self, values):
+        g = [max(-128, min(127, int(v))) for v in values[:10]]
+        g += [0] * (10 - len(g))
         with self.lock:
-            self.gain = list(values)
+            self.gain = g
+
+    def gain_cmd(self):
+        with self.lock:
+            return list(self.gain)
 
     def toggle_show_det(self):
         with self.lock:
@@ -1069,7 +1075,7 @@ def set_smooth_alpha(alpha):
 def fcc_tx_packet():
     fields = [FCC_TX_HEADER1, FCC_TX_HEADER2,
               0, 0.0, 0.0, 0, 0.0, 0.0, 0, 0,
-              0, 0, 0, 0, 0, 0] + [0] * 10
+              0, 0, 0, 0, 0, 0] + state.gain_cmd()
     raw = struct.pack(FCC_TX_FMT, *(fields + [0]))
     return raw[:-1] + bytes([sum(raw[:-1]) & 0xFF])
 

@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 import json
+import queue
 import struct
 import termios
 
@@ -53,6 +54,8 @@ CAM_HFOV_DEG = float(os.environ.get("CAM_HFOV_DEG", "35.5"))
 CAM_VFOV_DEG = float(os.environ.get("CAM_VFOV_DEG", "20.41"))
 CAM_HFOV_TAN = math.tan(math.radians(CAM_HFOV_DEG) / 2.0)
 CAM_VFOV_TAN = math.tan(math.radians(CAM_VFOV_DEG) / 2.0)
+ROTATE_HFOV_DEG = 17.47
+ROTATE_VFOV_DEG = 9.87
 PAN_STEP     = 100 * CAP_K
 ZOOM_STEP    = 0.1
 TAU_PAN    = float(os.environ.get("TAU_PAN",    "0.205"))
@@ -92,6 +95,13 @@ PRED_ENABLE = os.environ.get("PRED_ENABLE", "1") not in ("0", "false", "no")
 PRED_MAX_AGE = float(os.environ.get("PRED_MAX_AGE", "0.15"))
 LFC_DUMP_DIR = os.environ.get("LFC_DUMP_DIR", "")
 STATUS_FILE = os.environ.get("STATUS_FILE", "")
+
+REC_ENABLE  = os.environ.get("REC_ENABLE", "1") not in ("0", "false", "no")
+REC_MOUNT   = os.environ.get("REC_MOUNT", "/mnt/usb")
+REC_DIR     = os.environ.get("REC_DIR", os.path.join(REC_MOUNT, "snap"))
+REC_JPEG_Q  = int(os.environ.get("REC_JPEG_Q", "95"))
+REC_MIN_MB  = int(os.environ.get("REC_MIN_MB", "128"))
+REC_QUEUE   = int(os.environ.get("REC_QUEUE", "4"))
 STATUS_EVERY = int(os.environ.get("STATUS_EVERY", str(FPS)))
 LFC_DUMP_N   = int(os.environ.get("LFC_DUMP_N", "256"))
 LFC_DUMP_EVERY = int(os.environ.get("LFC_DUMP_EVERY", "3"))
@@ -999,8 +1009,14 @@ class SharedState:
             return self.osd_master, self.osd_zoom
 
     def set_gain(self, values):
+        g = [max(-128, min(127, int(v))) for v in values[:10]]
+        g += [0] * (10 - len(g))
         with self.lock:
-            self.gain = list(values)
+            self.gain = g
+
+    def gain_cmd(self):
+        with self.lock:
+            return list(self.gain)
 
 
     def set_show_det(self, on):
@@ -1035,6 +1051,7 @@ class SharedState:
             s["pred"] = dict(self.pred)
             s["rotate"] = list(self.rotate)
             s["center"] = self.center_pending
+            s["snap"] = snap_status()
             s["fcc"] = {"valid": self.fcc_tgt["valid"],
                         "nx": round(self.fcc_tgt["nx"], 4),
                         "ny": round(self.fcc_tgt["ny"], 4),
@@ -1136,7 +1153,7 @@ def fcc_tx_packet():
               1 if on else 0, t["nx"], t["ny"], 1 if on else 0,
               xm, ym, 0, state.center_cmd(),
               0, _deg_x10(t["pitch"]) if on else 0,
-              _deg_x10(t["yaw"]) if on else 0, 0, 0, 0] + [0] * 10
+              _deg_x10(t["yaw"]) if on else 0, 0, 0, 0] + state.gain_cmd()
     raw = struct.pack(FCC_TX_FMT, *(fields + [0]))
     return raw[:-1] + bytes([FCC_CHECKSUM(raw[:-1])])
 
@@ -1201,6 +1218,11 @@ def handle_gcs_message(msg):
         gcs_track_action(msg)
 
     elif cmd == CMD_GIMBAL_ROTATE:
+        global CAM_HFOV_DEG, CAM_VFOV_DEG, CAM_HFOV_TAN, CAM_VFOV_TAN
+        CAM_HFOV_DEG = ROTATE_HFOV_DEG
+        CAM_VFOV_DEG = ROTATE_VFOV_DEG
+        CAM_HFOV_TAN = math.tan(math.radians(CAM_HFOV_DEG) / 2.0)
+        CAM_VFOV_TAN = math.tan(math.radians(CAM_VFOV_DEG) / 2.0)
         state.set_rotate(_s8(msg[p]), _s8(msg[p + 1]))
 
     elif cmd == CMD_DIGITAL_TILT:
@@ -1223,6 +1245,73 @@ def handle_gcs_message(msg):
         raw = struct.unpack_from("<H", msg, p)[0]
         f = min(1.0, raw / GCS_ZOOM_RAW_MAX)
         ptz.set_zoom(MIN_ZOOM + f * (MAX_ZOOM - MIN_ZOOM))
+
+
+_snap_q = queue.Queue(maxsize=REC_QUEUE)
+_snap_stat = {"n": 0, "last": None, "err": None, "drop": 0}
+_snap_lock = threading.Lock()
+
+
+def snap_request(bgr, box, meta):
+    if not REC_ENABLE or bgr is None:
+        return
+    try:
+        _snap_q.put_nowait((bgr.copy(), box, meta))
+    except queue.Full:
+        with _snap_lock:
+            _snap_stat["drop"] += 1
+
+
+def _snap_write(bgr, box, meta):
+    if not os.path.ismount(REC_MOUNT):
+        raise OSError("%s not mounted" % REC_MOUNT)
+    vfs = os.statvfs(REC_MOUNT)
+    if vfs.f_bavail * vfs.f_frsize < REC_MIN_MB * 1024 * 1024:
+        raise OSError("low space on %s" % REC_MOUNT)
+    os.makedirs(REC_DIR, exist_ok=True)
+    t = meta["ts"]
+    name = "%s_%03d_f%06d" % (time.strftime("%Y%m%d_%H%M%S", time.localtime(t)),
+                              int((t % 1.0) * 1000), meta["frame_id"])
+    path = os.path.join(REC_DIR, name + ".jpg")
+    ok, buf = cv2.imencode(".jpg", bgr,
+                           [int(cv2.IMWRITE_JPEG_QUALITY), REC_JPEG_Q])
+    if not ok:
+        raise OSError("jpeg encode failed")
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(buf.tobytes())
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    rec = {"file": os.path.basename(path), "ts": round(t, 3),
+           "frame_id": meta["frame_id"],
+           "size": [int(bgr.shape[1]), int(bgr.shape[0])],
+           "box": [round(float(v), 1) for v in box] if box else None,
+           "zoom": meta.get("zoom"), "crop": meta.get("crop")}
+    with open(os.path.join(REC_DIR, "index.jsonl"), "a") as f:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    return path
+
+
+def snap_loop():
+    while True:
+        bgr, box, meta = _snap_q.get()
+        try:
+            path = _snap_write(bgr, box, meta)
+            with _snap_lock:
+                _snap_stat["n"] += 1
+                _snap_stat["last"] = os.path.basename(path)
+                _snap_stat["err"] = None
+        except Exception as e:
+            with _snap_lock:
+                _snap_stat["err"] = str(e)[:80]
+
+
+def snap_status():
+    with _snap_lock:
+        return dict(_snap_stat)
 
 
 def fcc_open(path, baud):
@@ -1385,6 +1474,9 @@ def pipeline():
                 else:
                     box = (capx - LFC_INIT_BOX / 2, capy - LFC_INIT_BOX / 2,
                            LFC_INIT_BOX, LFC_INIT_BOX)
+                snap_request(bgr, box, {"ts": _now, "frame_id": frame_id,
+                                        "zoom": round(ptz.state()[2], 3),
+                                        "crop": list(crop) if crop else None})
                 if lfc is not None:
                     lfc.request_start(bgr, box)
                     follow = True
@@ -1542,6 +1634,7 @@ def main():
 
     threading.Thread(target=gcs_loop, daemon=True).start()
     threading.Thread(target=fcc_loop, daemon=True).start()
+    threading.Thread(target=snap_loop, daemon=True).start()
     pipeline()
 
 
