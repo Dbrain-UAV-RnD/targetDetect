@@ -50,6 +50,12 @@ STAB_W        = int(os.environ.get("STAB_W", "240"))
 STAB_H        = int(os.environ.get("STAB_H", str(max(2, int(round(
                     STAB_W * CAP_H / float(CAP_W) / 2.0)) * 2))))
 STAB_ZOOM     = float(os.environ.get("STAB_ZOOM", "1.15"))
+# 크롭으로 여백을 확보하는 대신 검은 테두리를 허용하는 모드. 화각을 온전히
+# 쓰는 대신 보정량만큼 가장자리가 비는데, 완전 무제한은 불가능하다 -
+# 지속적인 팬에서 보정량이 속도x tau (실측 3180px/s x 0.6s = 1908px) 까지
+# 자라 화면이 통째로 날아간다. 상한만 크게 열어둔다.
+STAB_FREE     = os.environ.get("STAB_FREE", "0") not in ("0", "false", "no")
+STAB_FREE_PX  = float(os.environ.get("STAB_FREE_PX", "200"))
 STAB_TAU      = float(os.environ.get("STAB_TAU", "0.60"))
 STAB_TAU_MIN  = float(os.environ.get("STAB_TAU_MIN", "0.10"))
 STAB_TAU_MAX  = float(os.environ.get("STAB_TAU_MAX", "2.00"))
@@ -245,7 +251,9 @@ def frame_jitter(samples):
 def stab_margin():
     """안정화가 켜져 있으면 크롭창이 STAB_ZOOM 만큼 줄어 있다."""
     stab = STAB_REF.get("stab")
-    return STAB_ZOOM if (stab is not None and stab.enabled) else 1.0
+    if STAB_FREE or stab is None or not stab.enabled:
+        return 1.0
+    return STAB_ZOOM
 
 
 def xform_box(m, box):
@@ -287,6 +295,11 @@ def box_smooth(prev, new, dt):
     w = pw + a * (nw - pw)
     h = ph + a * (nh - ph)
     return (pcx + a * dx - 0.5 * w, pcy + a * dy - 0.5 * h, w, h)
+
+
+def _fit_free(m):
+    """STAB_FREE 모드 - 센서 밖으로 나가도 검은 테두리로 보여준다."""
+    return True
 
 
 def crop_fits(cw3, m):
@@ -1154,7 +1167,8 @@ class FrameStabilizer:
 
     def status(self):
         return {"on": bool(self.enabled), "tau": round(self.tau, 2),
-                "zoom": round(STAB_ZOOM, 3), "pts": int(self.pts),
+                "zoom": 1.0 if STAB_FREE else round(STAB_ZOOM, 3),
+                "free": bool(STAB_FREE), "pts": int(self.pts),
                 "fail": int(self.fail), "sat": round(self.sat, 2),
                 "v": [round(self.vx), round(self.vy)],
                 "rs_ms": round(STAB_RS_MS, 1), "ms": round(self.ms, 2)}
@@ -1393,8 +1407,11 @@ class Renderer:
         t0 = time.perf_counter()
         bgr, M, rect, label, box, trk = job
         if rect is None:
-            out = cv2.warpAffine(bgr, M, (OUT_W, OUT_H), flags=cv2.INTER_LINEAR,
-                                 borderMode=cv2.BORDER_REPLICATE)
+            out = cv2.warpAffine(
+                bgr, M, (OUT_W, OUT_H), flags=cv2.INTER_LINEAR,
+                borderMode=(cv2.BORDER_CONSTANT if STAB_FREE
+                            else cv2.BORDER_REPLICATE),
+                borderValue=(0, 0, 0))
         else:
             x0, y0, x1, y1 = rect
             if (x1 - x0) == OUT_W and (y1 - y0) == OUT_H:
@@ -2072,7 +2089,7 @@ def pipeline():
                     ptz.set_target(sx + pred_dx + lx, sy + pred_dy + ly)
 
             cx, cy, win_w, win_h = ptz.window()
-            if stab.enabled:
+            if stab.enabled and not STAB_FREE:
                 # 보정에 쓸 여백만큼 크롭 창을 미리 줄여둔다 (offline BORDER_ZOOM)
                 win_w /= STAB_ZOOM
                 win_h /= STAB_ZOOM
@@ -2093,19 +2110,23 @@ def pipeline():
                     [0.0, OUT_H / win_h, -OUT_H / win_h * y0f],
                     [0.0, 0.0, 1.0],
                 ], dtype=np.float64)
+                if STAB_FREE:
+                    fit = _fit_free
+                    budget = (STAB_FREE_PX, STAB_FREE_PX)
+                else:
+                    fit = lambda m: crop_fits(cw3, m)
+                    budget = (max(1.0, min(x0f, CAP_W - (x0f + win_w))),
+                              max(1.0, min(y0f, CAP_H - (y0f + win_h))))
                 if _now >= stab_next:
                     # 진동은 렌더 주기보다 빠를 수 있다. 추정을 렌더에 묶으면
                     # 그 위 주파수가 접혀 들어와(aliasing) 느린 출렁임이 된다.
                     stab_next = max(_now - stab_period, stab_next) + stab_period
-                    stab_m = stab.update(
-                        proc, lambda m: crop_fits(cw3, m),
-                        (max(1.0, min(x0f, CAP_W - (x0f + win_w))),
-                         max(1.0, min(y0f, CAP_H - (y0f + win_h)))))
+                    stab_m = stab.update(proc, fit, budget)
                 else:
                     # 지난 tick 의 크롭창으로 검증된 보정이다. 그 사이 PTZ 가
                     # 센서 가장자리로 이동했을 수 있으니 다시 확인한다.
                     stab_m = stab.warp
-                    if stab_m is not None and not crop_fits(cw3, stab_m):
+                    if stab_m is not None and not fit(stab_m):
                         stab_m = None
 
             # 여기서는 행렬만 만든다. 픽셀 작업은 렌더 스레드로 넘긴다.

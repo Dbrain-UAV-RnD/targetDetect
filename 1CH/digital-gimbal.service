@@ -13,6 +13,9 @@ Environment=FCC_BAUD=115200
 Environment=FCC_HZ=50
 Environment=CAM_BACKEND=v4l2
 Environment=RTSP_FPS=12
+Environment=STAB_FREE=1
+Environment=STAB_FREE_PX=200
+Environment=STAB_TAU=1.5
 Environment=OUT_W=1920
 Environment=OUT_H=1080
 Environment=LFC_RATE=24
