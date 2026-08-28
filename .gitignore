@@ -12,4 +12,8 @@
 !1CH/gimbal-camera-ready.sh
 !1CH/digital_gimbal.py
 !1CH/validate_0b.py
-!1CH/HANDOFF.md
+
+!1CH_SUPER/
+!1CH_SUPER/**
+1CH_SUPER/logs/
+1CH_SUPER/**/__pycache__/

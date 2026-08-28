@@ -1899,7 +1899,14 @@ def handle_gcs_message(msg):
         return
 
     if cmd == CMD_AI_MODE:
-        state.set_show_det(bool(msg[p]))
+        #state.set_show_det(bool(msg[p]))
+
+        stab = STAB_REF.get("stab")
+        if stab is not None:
+            if msg[p] == GCS_STAB_RESET:
+                stab.request_reset()
+            else:
+                stab.set_enabled(msg[p])
 
     elif cmd in (CMD_GIMBAL_ZOOM, CMD_TEST_DIGITAL_ZOOM):
         d = _s8(msg[p])
