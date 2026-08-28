@@ -7,6 +7,7 @@ from config import (GCS_UDP_PORT, GCS_HEADER1, GCS_HEADER2,
                     CMD_CAM_HEARTBEAT, CMD_AI_MODE, CMD_TRACK_ACTION,
                     CMD_GIMBAL_CENTER, CMD_GIMBAL_ZOOM,
                     CMD_TEST_DIGITAL_ZOOM, CMD_TEST_ZOOM_RAW,
+                    CMD_STABILIZER_MODE, CMD_STABILIZER_ALPHA,
                     GCS_REF_W, GCS_REF_H, GCS_ZOOM_RAW_MAX, MAX_ZOOM,
                     PROC_W, PROC_H)
 
@@ -18,14 +19,18 @@ def _s8(v):
 class GcsLink:
     def __init__(self, on_track=None, on_clear=None, on_center=None,
                  on_ai_mode=None, on_zoom_rate=None, on_zoom_abs=None,
-                 zoom=None, port=GCS_UDP_PORT):
+                 on_stab_mode=None, on_stab_alpha=None,
+                 zoom=None, view=None, port=GCS_UDP_PORT):
         self.on_track = on_track
         self.on_clear = on_clear
         self.on_center = on_center
         self.on_ai_mode = on_ai_mode
         self.on_zoom_rate = on_zoom_rate
         self.on_zoom_abs = on_zoom_abs
+        self.on_stab_mode = on_stab_mode
+        self.on_stab_alpha = on_stab_alpha
         self.zoom = zoom or (lambda: 1.0)
+        self.view = view
         self.port = port
         self._run = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -84,6 +89,14 @@ class GcsLink:
                 f = min(1.0, raw / GCS_ZOOM_RAW_MAX)
                 self.on_zoom_abs(1.0 + f * (MAX_ZOOM - 1.0))
 
+        elif cmd == CMD_STABILIZER_MODE:
+            if self.on_stab_mode:
+                self.on_stab_mode(msg[p])
+
+        elif cmd == CMD_STABILIZER_ALPHA:
+            if self.on_stab_alpha:
+                self.on_stab_alpha(msg[p])
+
         elif cmd == CMD_AI_MODE:
             if self.on_ai_mode:
                 self.on_ai_mode(msg[p])
@@ -99,12 +112,15 @@ class GcsLink:
         fx, fy = PROC_W / GCS_REF_W, PROC_H / GCS_REF_H
         x1, x2 = sorted((sx * fx, ex * fx))
         y1, y2 = sorted((sy * fy, ey * fy))
-        z = max(1.0, self.zoom())
+        if self.view is not None:
+            z, ox, oy = self.view()
+        else:
+            z, ox, oy = max(1.0, self.zoom()), 0.0, 0.0
         hw, hh = PROC_W / 2.0, PROC_H / 2.0
-        x1 = hw + (x1 - hw) / z
-        x2 = hw + (x2 - hw) / z
-        y1 = hh + (y1 - hh) / z
-        y2 = hh + (y2 - hh) / z
+        x1 = hw + (x1 - hw) / z + ox
+        x2 = hw + (x2 - hw) / z + ox
+        y1 = hh + (y1 - hh) / z + oy
+        y2 = hh + (y2 - hh) / z + oy
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         box = None if (x2 - x1 < 2 or y2 - y1 < 2) else (x1, y1, x2 - x1, y2 - y1)
         if self.on_track:

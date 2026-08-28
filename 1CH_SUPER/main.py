@@ -17,6 +17,7 @@ from core.state_machine import StateMachine, State
 from core.control import control_step, CmdFilter
 from core.watchdog import Watchdog
 from core.ptz import DigitalZoom
+from core.stab import Stabilizer
 from core.latency import LatencyLog
 from core.shm import FrameSlot, BlobSlot
 from comms.gcs import GcsLink
@@ -64,13 +65,14 @@ class App:
 
 
 def fast_loop(app):
+    stab = Stabilizer()
     rtsp = None
     renderer = None
     if RTSP_ENABLE:
         try:
             from core.rtsp import RtspServer, RtspRenderer
             rtsp = RtspServer().start()
-            renderer = RtspRenderer(rtsp)
+            renderer = RtspRenderer(rtsp, stab)
         except Exception as e:
             pass
 
@@ -99,7 +101,9 @@ def fast_loop(app):
     zoom = DigitalZoom()
     gcs = GcsLink(on_track=app.on_track, on_clear=app.on_clear,
                   on_center=app.on_center, on_zoom_rate=zoom.set_rate,
-                  on_zoom_abs=zoom.set_zoom, zoom=zoom.value).start()
+                  on_zoom_abs=zoom.set_zoom, zoom=zoom.value,
+                  on_stab_mode=stab.set_mode, on_stab_alpha=stab.set_alpha,
+                  view=lambda: stab.view(zoom.value())).start()
     fcc = FccLink(app.fcc_command).start()
 
     cmdf = CmdFilter()
@@ -115,6 +119,7 @@ def fast_loop(app):
             bgr, proc, gray, t_cap = cam.read()
             frame_id += 1
             wdg.feed()
+            stab.update(gray, t_cap)
             frame_slot.write(bgr, t_cap, frame_id)
             t0 = time.perf_counter()
 
@@ -209,6 +214,7 @@ def fast_loop(app):
                                 f"c={getattr(app.tracker, 'color_d', 0.0):.3f} "
                                 f"c0={getattr(app.tracker, 'color_d0', 0.0):.3f} "
                                 f"f={getattr(app.tracker, 'frac', 0.0):.2f} "
+                                f"sb={stab.ms:.1f}ms sr={stab.response} "
                                 f"depth={app.depth_m} tof={tof.latest_m}")
             if rtsp is not None and rtsp.active:
                 now = time.monotonic()

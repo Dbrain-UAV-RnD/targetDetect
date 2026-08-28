@@ -99,8 +99,9 @@ class RtspServer:
 
 
 class RtspRenderer:
-    def __init__(self, rtsp):
+    def __init__(self, rtsp, stab=None):
         self.rtsp = rtsp
+        self.stab = stab
         self.cv = threading.Condition()
         self.job = None
         self.dropped = 0
@@ -131,10 +132,18 @@ class RtspRenderer:
                 bgr, box, zoom = self.job
                 self.job = None
             try:
-                z = max(1.0, zoom)
+                uz = z = max(1.0, zoom)
+                stab_on = False
+                ox = oy = 0.0
+                if self.stab is not None:
+                    z, ox, oy = self.stab.view(z)
+                    stab_on = self.stab.enabled
                 H, W = bgr.shape[:2]
                 cw, ch = max(2, int(W / z)), max(2, int(H / z))
-                x0, y0 = (W - cw) // 2, (H - ch) // 2
+                x0 = (W - cw) // 2 + int(round(ox * W / PROC_W))
+                y0 = (H - ch) // 2 + int(round(oy * H / PROC_H))
+                x0 = max(0, min(W - cw, x0))
+                y0 = max(0, min(H - ch, y0))
                 out = cv2.resize(bgr[y0:y0 + ch, x0:x0 + cw],
                                  (RTSP_W, RTSP_H))
                 if box is None:
@@ -162,7 +171,9 @@ class RtspRenderer:
                 self._push_t = [t for t in self._push_t if now - t < 2.0]
                 self._push_t.append(now)
                 out_fps = len(self._push_t) / 2.0
-                label = f"FPS:{out_fps:.0f} ZOOM:x{z:.1f}"
+                label = f"FPS:{out_fps:.0f} ZOOM:x{uz:.1f}"
+                if stab_on:
+                    label += " STAB"
                 cv2.putText(out, label, (16, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4,
                             cv2.LINE_AA)

@@ -54,6 +54,16 @@ REACQ_TIMEOUT_S = _env_float("REACQ_TIMEOUT_S", 10.0)
 
 HAILO_RESULT_MAX_AGE_S = _env_float("HAILO_RESULT_MAX_AGE_S", 0.5)
 
+STAB_ENABLE  = os.environ.get("STAB", "1") not in ("0", "", "false", "no")
+STAB_W       = _env_int("STAB_W", 240)
+STAB_H       = _env_int("STAB_H", 135)
+STAB_MARGIN  = _env_float("STAB_MARGIN", 0.05)
+STAB_TAU     = _env_float("STAB_TAU", 0.4)
+STAB_TAU_MIN = _env_float("STAB_TAU_MIN", 0.1)
+STAB_TAU_MAX = _env_float("STAB_TAU_MAX", 2.0)
+STAB_CORNERS = _env_int("STAB_CORNERS", 40)
+STAB_MIN_PTS = _env_int("STAB_MIN_PTS", 12)
+
 TERM_LOCK_FRAC      = _env_float("TERM_LOCK_FRAC", 0.35)
 TERM_LOCK_TIMEOUT_S = _env_float("TERM_LOCK_TIMEOUT_S", 3.0)
 COAST_S             = _env_float("COAST_S", 0.4)
@@ -117,6 +127,9 @@ CMD_SET_GAIN        = 10
 CMD_SET_OSD_DISPLAY = 13
 CMD_TEST_DIGITAL_ZOOM = 20
 CMD_TEST_ZOOM_RAW     = 22
+CMD_STABILIZER_MODE   = 31
+CMD_STABILIZER_ALPHA  = 32
+GCS_STAB_RESET        = 0xFF
 
 GCS_REF_W, GCS_REF_H = 1920, 1080
 GCS_ZOOM_RAW_MAX = 0x4000
