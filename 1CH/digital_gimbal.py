@@ -44,6 +44,40 @@ LK_PARAMS = dict(
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
 )
 
+# --- 실시간 영상 안정화 (offline stabilize_video.py 의 4-DOF similarity 방식) ---
+STAB_ENABLE   = os.environ.get("STAB", "1") not in ("0", "false", "no")
+STAB_W        = int(os.environ.get("STAB_W", "240"))
+STAB_H        = int(os.environ.get("STAB_H", str(max(2, int(round(
+                    STAB_W * CAP_H / float(CAP_W) / 2.0)) * 2))))
+STAB_ZOOM     = float(os.environ.get("STAB_ZOOM", "1.15"))
+STAB_TAU      = float(os.environ.get("STAB_TAU", "0.60"))
+STAB_TAU_MIN  = float(os.environ.get("STAB_TAU_MIN", "0.10"))
+STAB_TAU_MAX  = float(os.environ.get("STAB_TAU_MAX", "2.00"))
+STAB_CORNERS  = int(os.environ.get("STAB_CORNERS", "60"))
+STAB_QUALITY  = float(os.environ.get("STAB_QUALITY", "0.01"))
+STAB_MIN_DIST = 8
+STAB_MIN_PTS  = 12
+STAB_FB_ERR   = 1.0
+STAB_HIST     = int(os.environ.get("STAB_HIST", "96"))        # 보정 이력 길이
+STAB_DEAD     = float(os.environ.get("STAB_DEAD", "1.0"))     # capture px
+STAB_DEAD_DEG = float(os.environ.get("STAB_DEAD_DEG", "0.03"))
+STAB_WALL     = float(os.environ.get("STAB_WALL", "2.0"))
+STAB_STEP_MAX = float(os.environ.get("STAB_STEP_MAX", "0"))  # capture px/tick, 0=무제한
+STAB_DC_TAU   = float(os.environ.get("STAB_DC_TAU", "0"))     # 팬 DC 분리. 실측상
+                                                            # 손팬은 등속이 아니라 오히려 나빠져 기본 끔
+# 30Hz 로 낮추면 고주파 진동에서 오히려 안 켠 것보다 나쁜 순간이 생긴다
+# (실측: tap 영상 max 353px vs OFF 215px). 전속 추정이 필요하다.
+STAB_RATE     = float(os.environ.get("STAB_RATE", str(FPS)))
+STAB_RS_MS    = float(os.environ.get("STAB_RS_MS", "0.0"))    # 센서 readout 시간
+STAB_RS_TAU   = float(os.environ.get("STAB_RS_TAU", "0.08"))
+STAB_KX       = CAP_W / float(STAB_W)
+STAB_KY       = CAP_H / float(STAB_H)
+STAB_LK = dict(
+    winSize=(15, 15),
+    maxLevel=2,
+    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03),
+)
+
 MIN_ZOOM     = 1.0
 DEFAULT_ZOOM = 1.0
 MAX_ZOOM     = float(os.environ.get("MAX_ZOOM", "5.0"))
@@ -54,8 +88,8 @@ CAM_HFOV_DEG = float(os.environ.get("CAM_HFOV_DEG", "35.5"))
 CAM_VFOV_DEG = float(os.environ.get("CAM_VFOV_DEG", "20.41"))
 CAM_HFOV_TAN = math.tan(math.radians(CAM_HFOV_DEG) / 2.0)
 CAM_VFOV_TAN = math.tan(math.radians(CAM_VFOV_DEG) / 2.0)
-ROTATE_HFOV_DEG = 17.47
-ROTATE_VFOV_DEG = 9.87
+ROTATE_HFOV_DEG = 35.5
+ROTATE_VFOV_DEG = 20.41
 PAN_STEP     = 100 * CAP_K
 ZOOM_STEP    = 0.1
 TAU_PAN    = float(os.environ.get("TAU_PAN",    "0.205"))
@@ -115,6 +149,13 @@ LFC_SCALE_HOLD   = float(os.environ.get("LFC_SCALE_HOLD",   "1.005"))
 LFC_SCALE_SCORE  = float(os.environ.get("LFC_SCALE_SCORE",  "0.70"))
 LFC_SCALE_MIN_PX = float(os.environ.get("LFC_SCALE_MIN_PX", "16")) * CAP_K
 LFC_SCALE_MAX_PX = float(os.environ.get("LFC_SCALE_MAX_PX", "0.75")) * CAP_H
+# --- 표적 박스 평활 (안정화 좌표계에서 판정한다) ---
+BOX_DEAD     = float(os.environ.get("BOX_DEAD", "8.0")) * CAP_K
+BOX_SPAN     = float(os.environ.get("BOX_SPAN", "12.0")) * CAP_K
+BOX_MIN      = float(os.environ.get("BOX_MIN", "0.15"))
+BOX_MAX_RATE = float(os.environ.get("BOX_MAX_RATE", "3000.0")) * CAP_K  # px/s
+BOX_HOLD_LOW = os.environ.get("BOX_HOLD_LOW", "1") not in ("0", "false", "no")
+
 LFC_IN_Z  = "lightfc_backbone_scope1/input_layer1"
 LFC_IN_X  = "lightfc_backbone_scope2/input_layer2"
 LFC_OUT_Z = "lightfc_backbone_scope1/conv26"
@@ -199,6 +240,64 @@ def frame_jitter(samples):
                     "sensor_max": round(sens[-1], 1),
                     "sensor_drops": sum(1 for v in sens if v > 100.0)})
     return out
+
+
+def stab_margin():
+    """안정화가 켜져 있으면 크롭창이 STAB_ZOOM 만큼 줄어 있다."""
+    stab = STAB_REF.get("stab")
+    return STAB_ZOOM if (stab is not None and stab.enabled) else 1.0
+
+
+def xform_box(m, box):
+    """박스를 2x3 로 옮긴다 (중심 이동 + 스케일)."""
+    x, y, w, h = box
+    cx, cy = apply_pt(m, x + 0.5 * w, y + 0.5 * h)
+    sc = math.hypot(m[0, 0], m[1, 0])
+    w *= sc
+    h *= sc
+    return (cx - 0.5 * w, cy - 0.5 * h, w, h)
+
+
+def box_smooth(prev, new, dt):
+    """표적 박스 데드밴드 + 속도 제한.
+
+    반드시 안정화 좌표계에서 비교해야 한다. 센서 좌표에서 재면 카메라
+    흔들림(실측 p95 55px/frame)이 매 프레임 데드밴드를 뚫고 지나가
+    평활 계수가 1.0 으로 포화돼 아무 효과가 없다.
+
+    표적이 물리적으로 낼 수 없는 속도로 튀는 것은 추적기가 다른 물체로
+    옮겨갔다는 뜻이므로, 그만큼만 따라가 급격한 점프를 막는다.
+    """
+    if prev is None:
+        return new
+    px, py, pw, ph = prev
+    nx, ny, nw, nh = new
+    pcx, pcy = px + 0.5 * pw, py + 0.5 * ph
+    ncx, ncy = nx + 0.5 * nw, ny + 0.5 * nh
+    dx, dy = ncx - pcx, ncy - pcy
+    d = math.hypot(dx, dy)
+    lim = BOX_MAX_RATE * max(1e-3, min(DT_MAX, dt))
+    if d > lim > 0.0:
+        k = lim / d
+        dx, dy, d = dx * k, dy * k, lim
+    if d <= BOX_DEAD:
+        a = 0.0
+    else:
+        a = min(1.0, max(BOX_MIN, (d - BOX_DEAD) / max(1e-6, BOX_SPAN)))
+    w = pw + a * (nw - pw)
+    h = ph + a * (nh - ph)
+    return (pcx + a * dx - 0.5 * w, pcy + a * dy - 0.5 * h, w, h)
+
+
+def crop_fits(cw3, m):
+    """보정 m 을 적용해도 출력 창이 센서 프레임 밖으로 나가지 않는지 검사"""
+    inv = cv2.invertAffineTransform((cw3 @ np.vstack([m, (0.0, 0.0, 1.0)]))[:2].copy())
+    # 겹선형 보간이 이웃 픽셀까지 읽으므로 1.5px 안쪽으로 여유를 둔다
+    for px, py in ((0.0, 0.0), (OUT_W, 0.0), (0.0, OUT_H), (OUT_W, OUT_H)):
+        qx, qy = apply_pt(inv, px, py)
+        if qx < 1.5 or qy < 1.5 or qx > CAP_W - 1.5 or qy > CAP_H - 1.5:
+            return False
+    return True
 
 
 def base_window():
@@ -769,6 +868,298 @@ class TargetTracker:
         return self.center
 
 
+class FrameStabilizer:
+    """실시간 4-DOF(similarity) 영상 안정화.
+
+    오프라인 stabilize_video.py 와 같이 dx/dy/da 가 아니라 similarity 행렬
+    (a, b, tx, ty) 를 다룬다. 드론 접근처럼 프레임간 스케일이 변하는 장면에서
+    zoom 을 translation 으로 오인하지 않는다.
+
+    다만 오프라인처럼 절대 경로 A_i 를 누적하지는 않는다. 프레임간 추정의
+    미세한 스케일 편향이 곱셈으로 쌓여 정지 화면에서도 A 가 발산하기 때문이다
+    (실측: 80 프레임에 스케일 2.15 배). 대신 보정 행렬 W 자체를 상태로 두고
+
+        W <- leak(W . step^-1)
+
+    로 갱신한다. step^-1 은 카메라가 움직인 만큼 화면을 되돌리고, leak 은 W 를
+    항등 쪽으로 시정수 tau 로 놓아준다 - 즉 새는 적분기다. 편향이 쌓여도 leak
+    이 계속 지워내므로 발산하지 않고, 미래 프레임 없이도 인과적으로 동작한다.
+    """
+
+    def __init__(self):
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self.enabled = STAB_ENABLE
+        self.tau = STAB_TAU
+        self.ms = 0.0
+        # 옛 측정을 현재 프레임으로 옮기기 위한 프레임간 이동 이력
+        # (벽시계, step 3x3). 누적본이 아니라 낱개를 들고 있는다 - 누적하면
+        # 스케일 편향이 곱해져 시간이 지날수록 발산한다.
+        self.hist = collections.deque(maxlen=STAB_HIST)
+        self.reset()
+
+    def request_reset(self):
+        """다른 스레드(GCS)에서 호출. update() 중간에 덮어써지지 않도록 플래그만 세운다."""
+        self._reset_req = True
+
+    def reset(self):
+        self._reset_req = False
+        self.hist.clear()
+        self.prev = None
+        self.W = np.eye(3)          # 보정 행렬 (stab 좌표계) - 유일한 누적 상태
+        self.warp = None            # capture 좌표계 2x3, None 이면 항등
+        self.pts = 0
+        self.fail = 0
+        self.sat = 0.0
+        self.clock = 0.0
+        self.vx = 0.0
+        self.vy = 0.0
+        self.dcx = 0.0
+        self.dcy = 0.0
+
+    def set_enabled(self, on):
+        on = bool(on)
+        if on and not self.enabled:
+            self.reset()
+        self.enabled = on
+
+    def set_tau(self, tau):
+        self.tau = max(STAB_TAU_MIN, min(STAB_TAU_MAX, float(tau)))
+
+    def _gray(self, proc):
+        g = proc if proc.ndim == 2 else cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        if g.shape[1] != STAB_W or g.shape[0] != STAB_H:
+            g = cv2.resize(g, (STAB_W, STAB_H), interpolation=cv2.INTER_AREA)
+        return self.clahe.apply(g)
+
+    @staticmethod
+    def _track(prev, curr, p0):
+        """forward-backward 검증을 통과한 대응점만 반환"""
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, curr, p0, None, **STAB_LK)
+        pb, stb, _ = cv2.calcOpticalFlowPyrLK(curr, prev, p1, None, **STAB_LK)
+        err = np.linalg.norm(p0 - pb, axis=2).ravel()
+        ok = (st.ravel() == 1) & (stb.ravel() == 1) & (err < STAB_FB_ERR)
+        return p0[ok], p1[ok]
+
+    @staticmethod
+    def _scale(W, s):
+        """보정량을 항등쪽으로 s 배 축소 (similarity 성질 유지)"""
+        B = np.eye(3)
+        B[0, 0] = B[1, 1] = 1.0 + s * (W[0, 0] - 1.0)
+        B[1, 0] = s * W[1, 0]
+        B[0, 1] = -B[1, 0]
+        B[0, 2] = s * W[0, 2]
+        B[1, 2] = s * W[1, 2]
+        return B
+
+    @staticmethod
+    def _to_capture(W):
+        """stab 좌표계 -> capture 좌표계. diag(Kx,Ky) . W . diag(Kx,Ky)^-1 켤레변환.
+
+        축 배율이 다르면 비대각 항도 바뀐다. 그냥 복사하면 skew 를 넣어버린다.
+        """
+        m = np.eye(3)
+        m[0, 0] = W[0, 0]
+        m[1, 1] = W[1, 1]
+        m[0, 1] = W[0, 1] * STAB_KX / STAB_KY
+        m[1, 0] = W[1, 0] * STAB_KY / STAB_KX
+        m[0, 2] = W[0, 2] * STAB_KX
+        m[1, 2] = W[1, 2] * STAB_KY
+        return m
+
+    def _rolling_shutter(self):
+        """롤링셔터 un-skew.
+
+        행 y 는 행 0 보다 (y/H)*T_r 만큼 늦게 읽히므로, 그 사이 이동한 만큼
+        내용이 밀려 찍힌다 -> 1차 근사로 x 는 y 에 비례한 shear, y 는 세로
+        스케일 오차가 된다. 둘 다 affine 이라 기존 warp 에 그냥 곱하면 된다.
+        중앙 행이 고정되도록 오프셋을 준다.
+        """
+        if STAB_RS_MS <= 0.0:
+            return None
+        r = (STAB_RS_MS / 1000.0) / float(CAP_H)
+        m = np.eye(3)
+        m[0, 1] = -self.vx * r
+        m[0, 2] = self.vx * r * CAP_H / 2.0
+        m[1, 1] = 1.0 - self.vy * r
+        m[1, 2] = self.vy * r * CAP_H / 2.0
+        return m
+
+    @staticmethod
+    def _deadzone(W):
+        """추정 잡음 수준의 미세 보정은 버린다 - 흔들리지 않는 화면을 흔들지 않게.
+
+        하드 임계가 아니라 크기에서 빼는 soft threshold 라 경계에서 튀지 않는다.
+        """
+        tx, ty = W[0, 2] * STAB_KX, W[1, 2] * STAB_KY
+        d = math.hypot(tx, ty)
+        if d > 1e-9:
+            f = max(0.0, d - STAB_DEAD) / d
+            W[0, 2] *= f
+            W[1, 2] *= f
+        sc = math.hypot(W[0, 0], W[1, 0])
+        ang = math.atan2(W[1, 0], W[0, 0])
+        if abs(ang) > 1e-12:
+            a2 = math.copysign(max(0.0, abs(ang) - math.radians(STAB_DEAD_DEG)), ang)
+            W[0, 0] = W[1, 1] = sc * math.cos(a2)
+            W[1, 0] = sc * math.sin(a2)
+            W[0, 1] = -W[1, 0]
+        return W
+
+    def update(self, proc, fit, budget):
+        """proc(그레이스케일)로 보정 행렬 갱신.
+
+        fit(2x3)->bool 이 센서 여유를 판정하고, budget 은 축별 허용 이동량
+        (bx, by) 이다. 세로 여유가 가로보다 훨씬 좁으므로 스칼라로 뭉뚱그리면
+        가로 보정을 필요 이상으로 죽인다.
+        """
+        if not self.enabled or proc is None:
+            self.warp = None
+            return None
+        if self._reset_req:
+            self.reset()
+        t0 = time.perf_counter()
+        now = time.monotonic()
+        dt = min(DT_MAX, now - self.clock) if self.clock else 0.0
+        self.clock = now
+
+        g = self._gray(proc)
+        if self.prev is None:
+            self.prev = g
+            self.warp = None
+            return None
+
+
+        m = None
+        p0 = cv2.goodFeaturesToTrack(self.prev, maxCorners=STAB_CORNERS,
+                                     qualityLevel=STAB_QUALITY,
+                                     minDistance=STAB_MIN_DIST, blockSize=7)
+        if p0 is not None and len(p0) >= STAB_MIN_PTS:
+            a, b = self._track(self.prev, g, p0)
+            self.pts = len(a)
+            if len(a) >= STAB_MIN_PTS:
+                m, _ = cv2.estimateAffinePartial2D(
+                    a, b, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+        else:
+            self.pts = 0
+        self.prev = g
+
+        # 추정 실패 시 직전 모션을 이어가는 대신 항등으로 둔다
+        if m is None:
+            self.fail += 1
+            step = np.eye(3)
+        else:
+            self.fail = 0
+            step = np.vstack([m, (0.0, 0.0, 1.0)])
+
+        if dt > 0.0:
+            av = 1.0 - math.exp(-dt / STAB_RS_TAU)
+            self.vx += av * (step[0, 2] * STAB_KX / dt - self.vx)
+            self.vy += av * (step[1, 2] * STAB_KY / dt - self.vy)
+
+        # 의도한 팬과 흔들림을 주파수로 가른다. 팬은 지속적이라 step 의 DC
+        # 성분으로 나타나고, 흔들림은 진동적이라 DC 가 0 이다. DC 를 빼고
+        # 적분하면 팬은 그대로 통과하고 흔들림만 보정된다. 진폭으로 가르면
+        # 큰 진동과 팬이 겹쳐 구분이 안 된다.
+        if STAB_DC_TAU > 0.0 and dt > 0.0:
+            a_dc = 1.0 - math.exp(-dt / STAB_DC_TAU)
+            self.dcx += a_dc * (step[0, 2] - self.dcx)
+            self.dcy += a_dc * (step[1, 2] - self.dcy)
+            step = step.copy()
+            step[0, 2] -= self.dcx
+            step[1, 2] -= self.dcy
+
+        if STAB_STEP_MAX > 0.0:
+            d = math.hypot(step[0, 2] * STAB_KX, step[1, 2] * STAB_KY)
+            if d > STAB_STEP_MAX:
+                f = STAB_STEP_MAX / d
+                step = step.copy()
+                step[0, 2] *= f
+                step[1, 2] *= f
+
+        # W <- W . step^-1 : 카메라가 움직인 만큼 화면을 되돌린다
+        det = step[0, 0] ** 2 + step[1, 0] ** 2
+        if det < 1e-9:
+            step_inv = np.eye(3)
+        else:
+            step_inv = np.eye(3)
+            step_inv[0, 0] = step_inv[1, 1] = step[0, 0] / det
+            step_inv[0, 1] = step[1, 0] / det
+            step_inv[1, 0] = -step_inv[0, 1]
+            step_inv[0, 2] = -(step_inv[0, 0] * step[0, 2] + step_inv[0, 1] * step[1, 2])
+            step_inv[1, 2] = -(step_inv[1, 0] * step[0, 2] + step_inv[1, 1] * step[1, 2])
+        W = self.W @ step_inv
+
+        # 보정량이 여유 한계에 가까울수록 빨리 놓아준다. 이 soft wall 이 없으면
+        # 매 프레임 하드 클램프에 걸렸다 풀렸다 하며 보정량이 출렁여 젤리가 된다.
+        u = min(1.0, max(abs(W[0, 2]) * STAB_KX / budget[0],
+                         abs(W[1, 2]) * STAB_KY / budget[1]))
+        tau = self.tau / (1.0 + STAB_WALL * u * u)
+
+        alpha = 1.0 - math.exp(-dt / tau) if dt > 0.0 else 0.0
+        W = self._scale(W, 1.0 - alpha)      # leak: 항등 쪽으로 놓아준다
+        self.W = W
+
+        W = self._deadzone(W.copy())
+        rs = self._rolling_shutter()
+
+        def compose(f):
+            Wc = self._to_capture(W if f >= 1.0 else self._scale(W, f))
+            return Wc if rs is None else Wc @ rs
+
+        s = 1.0
+        total = compose(1.0)
+        if not fit(total[:2]):
+            # soft wall 을 넘어선 경우의 최후 안전장치
+            lo, hi = 0.0, 1.0
+            for _ in range(6):
+                mid = (lo + hi) / 2.0
+                if fit(compose(mid)[:2]):
+                    lo = mid
+                else:
+                    hi = mid
+            s = lo
+            total = compose(s)
+            if not fit(total[:2]):
+                # RS 보정만으로도 여유를 넘는 경우가 있다. 최후엔 항등.
+                total = np.eye(3)
+                s = 0.0
+            self.W = self._scale(self.W, s)       # anti-windup
+        self.sat = 1.0 - s
+        self.warp = np.ascontiguousarray(total[:2])
+        self.hist.append((time.time(), step))
+        self.ms = (time.perf_counter() - t0) * 1e3
+        return self.warp
+
+    def last_t(self):
+        return self.hist[-1][0] if self.hist else 0.0
+
+    def transport(self, t):
+        """시각 t 의 센서 좌표를 현재 프레임 센서 좌표로 옮기는 2x3.
+
+        트래커 결과는 몇 프레임 전 좌표다. 그 사이 카메라가 움직인 만큼
+        표적의 센서 위치도 옮겨갔으므로, 그대로 그리면 밀린다. 여기서
+        되돌리면 남는 오차는 표적 자신의 실제 움직임뿐이다 - 속도 예측
+        같은 근사가 아니라 측정된 프레임간 이동을 그대로 곱한다.
+        """
+        if not self.hist:
+            return None
+        T = None
+        for ts, step in self.hist:
+            if ts <= t:
+                continue
+            T = step if T is None else step @ T
+        if T is None:
+            return None
+        return self._to_capture(T)[:2]
+
+    def status(self):
+        return {"on": bool(self.enabled), "tau": round(self.tau, 2),
+                "zoom": round(STAB_ZOOM, 3), "pts": int(self.pts),
+                "fail": int(self.fail), "sat": round(self.sat, 2),
+                "v": [round(self.vx), round(self.vy)],
+                "rs_ms": round(STAB_RS_MS, 1), "ms": round(self.ms, 2)}
+
+
 class VirtualPTZ:
 
     def __init__(self):
@@ -855,9 +1246,9 @@ class VirtualPTZ:
         with self.lock:
             return self.cx, self.cy, self.zoom
 
-    def pan_range(self):
+    def pan_range(self, margin=1.0):
         with self.lock:
-            w, h = self._win_for(self.zoom)
+            w, h = self._win_for(self.zoom * margin)
         return (max(0.0, (CAP_W - w) / 2),
                 max(0.0, (CAP_H - h) / 2))
 
@@ -944,6 +1335,91 @@ class RtspServer:
                     "port": self.port, "path": self.path,
                     "codec": RTSP_CODEC, "fps": RTSP_FPS,
                     "bitrate": RTSP_BITRATE, "size": [OUT_W, OUT_H]}
+
+
+class Renderer:
+    """크롭/보정 warp + OSD + RTSP push 를 캡처 루프에서 분리한다.
+
+    1080p warp 는 부하 상태에서 20ms 를 넘어 60fps 캡처 루프 예산(16.7ms)
+    안에 들어가지 않는다. 루프 안에 두면 프레임을 버리게 되고, 그러면 모션
+    추정 간격이 들쭉날쭉해져 고주파 진동이 접혀 들어와(aliasing) 젤리가
+    된다 - 실측에서 60.9fps 가 22fps 로, work_med 0.2ms 가 41.6ms 로 갔다.
+
+    최신 한 장만 들고 있다가 다른 코어에서 렌더하고, 밀리면 버린다. 표시
+    경로라 오래된 프레임을 붙잡느니 최신 프레임을 그리는 쪽이 항상 낫다.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.cv = threading.Condition(self.lock)
+        self.job = None
+        self.alive = True
+        self.dropped = 0
+        self.ms = 0.0
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def submit(self, job):
+        with self.cv:
+            if self.job is not None:
+                self.dropped += 1      # 렌더가 밀렸다 - 오래된 쪽을 버린다
+            self.job = job
+            self.cv.notify()
+
+    def stop(self):
+        with self.cv:
+            self.alive = False
+            self.cv.notify_all()
+
+    def stats(self):
+        with self.lock:
+            return {"ms": round(self.ms, 2), "dropped": self.dropped}
+
+    def _loop(self):
+        while True:
+            with self.cv:
+                while self.alive and self.job is None:
+                    self.cv.wait(0.5)
+                if not self.alive:
+                    return
+                job = self.job
+                self.job = None
+            try:
+                self._render(job)
+            except Exception:
+                pass
+
+    def _render(self, job):
+        t0 = time.perf_counter()
+        bgr, M, rect, label, box, trk = job
+        if rect is None:
+            out = cv2.warpAffine(bgr, M, (OUT_W, OUT_H), flags=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_REPLICATE)
+        else:
+            x0, y0, x1, y1 = rect
+            if (x1 - x0) == OUT_W and (y1 - y0) == OUT_H:
+                out = bgr[y0:y1, x0:x1].copy()
+            else:
+                interp = cv2.INTER_AREA if (x1 - x0) > OUT_W else cv2.INTER_CUBIC
+                out = cv2.resize(bgr[y0:y1, x0:x1], (OUT_W, OUT_H),
+                                 interpolation=interp)
+        if label:
+            cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 128), 1, cv2.LINE_AA)
+        if box is not None:
+            a, b, col = box
+            cv2.rectangle(out, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                          col, 2, cv2.LINE_AA)
+        elif trk is not None:
+            cv2.circle(out, (int(trk[0]), int(trk[1])), 18,
+                       (0, 255, 255), 2, cv2.LINE_AA)
+        if rtsp is not None:
+            rtsp.push(out)
+        t = (time.perf_counter() - t0) * 1e3
+        with self.lock:
+            self.ms = 0.8 * self.ms + 0.2 * t if self.ms else t
 
 
 class SharedState:
@@ -1107,6 +1583,8 @@ class SharedState:
 
 CAMERA_REF = {}
 LFC_REF = {}
+STAB_REF = {}
+RENDER_REF = {}
 
 ptz = VirtualPTZ()
 state = SharedState()
@@ -1117,13 +1595,17 @@ def _off_axis_rad(px, half, tan_half):
     return math.atan((px - half) / half * tan_half)
 
 
-def target_angles(tx, ty, vcx, vcy):
-    hx, hy = CAP_W / 2.0, CAP_H / 2.0
-    yaw = (_off_axis_rad(tx, hx, CAM_HFOV_TAN)
-           - _off_axis_rad(vcx, hx, CAM_HFOV_TAN))
-    pitch = (_off_axis_rad(vcy, hy, CAM_VFOV_TAN)
-             - _off_axis_rad(ty, hy, CAM_VFOV_TAN))
-    return math.degrees(yaw), math.degrees(pitch)
+def target_angles(tx, ty):
+    """광축(센서 중심) 기준 표적 시선각.
+
+    FCC 는 이 각도와 기체 자세로 표적 위치를 계산하므로 카메라 보어사이트
+    기준이어야 한다. 예전에는 화면 중심각을 빼서 "화면 중심 기준 상대각"
+    이었는데, 그러면 디지털 팬으로 크롭창이 광축에서 벗어난 만큼 그대로
+    오차가 됐다 (줌 2배 최대 팬에서 yaw 9.1도, 5배에서 14.4도). 줌 1배에서는
+    크롭창이 광축과 일치해 오차가 0이라 드러나지 않았다.
+    """
+    return (math.degrees(_off_axis_rad(tx, CAP_W / 2.0, CAM_HFOV_TAN)),
+            math.degrees(-_off_axis_rad(ty, CAP_H / 2.0, CAM_VFOV_TAN)))
 
 
 def _sum8(body):
@@ -1240,6 +1722,20 @@ def handle_gcs_message(msg):
 
     elif cmd == CMD_SET_OSD_DISPLAY:
         gcs_osd_display(msg)
+
+    elif cmd == CMD_STABILIZER_MODE:
+        stab = STAB_REF.get("stab")
+        if stab is not None:
+            if msg[p] == GCS_STAB_RESET:
+                stab.request_reset()
+            else:
+                stab.set_enabled(msg[p])
+
+    elif cmd == CMD_STABILIZER_ALPHA:
+        stab = STAB_REF.get("stab")
+        if stab is not None:
+            a = max(0, min(100, msg[p])) / 100.0
+            stab.set_tau(STAB_TAU_MIN + a * (STAB_TAU_MAX - STAB_TAU_MIN))
 
     elif cmd == CMD_TEST_ZOOM_RAW:
         raw = struct.unpack_from("<H", msg, p)[0]
@@ -1382,15 +1878,21 @@ def gcs_loop():
 def write_status(frame_id):
     st = state.snapshot()
     cx, cy, z = ptz.state()
-    rx, ry = ptz.pan_range()
+    rx, ry = ptz.pan_range(stab_margin())
     st["frame_id"] = frame_id
     st["pan"] = [round(cx), round(cy)]
     st["zoom"] = round(z, 2)
     st["zoom_max"] = round(MAX_ZOOM, 2)
-    st["zoom_real"] = round(REAL_ZOOM, 2)
+    st["zoom_real"] = round(REAL_ZOOM / stab_margin(), 2)
     st["zoom_rate"] = round(ptz.zoom_rate_now(), 3)
     st["pan_range"] = [round(rx), round(ry)]
     st["rtsp"] = rtsp.info() if rtsp is not None else {"on": False}
+    stab = STAB_REF.get("stab")
+    if stab is not None:
+        st["stab"] = stab.status()
+    renderer = RENDER_REF.get("renderer")
+    if renderer is not None:
+        st["render"] = renderer.stats()
     lfc = LFC_REF.get("lfc")
     if lfc is not None:
         sg = lfc.stage_stats()
@@ -1406,6 +1908,10 @@ def pipeline():
     cam = Camera(CAMERA_INDEX, CAP_W, CAP_H, FPS)
     CAMERA_REF["cam"] = cam
     tracker = TargetTracker()
+    stab = FrameStabilizer()
+    STAB_REF["stab"] = stab
+    renderer = Renderer()
+    RENDER_REF["renderer"] = renderer
     try:
         lfc = LightFCTracker()
         LFC_REF["lfc"] = lfc
@@ -1420,8 +1926,12 @@ def pipeline():
     prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
     frame_id = 0
     lfc_box, lfc_center, lfc_score, lfc_t = None, None, 0.0, 0.0
+    box_s, box_s_t, lfc_seen, meas_t = None, 0.0, 0.0, 0.0
+    last_bgr = None
     rtsp_period = 1.0 / max(1, RTSP_FPS)
     rtsp_next = 0.0
+    stab_period = 1.0 / max(1.0, STAB_RATE)
+    stab_next = 0.0
     tx_hist = collections.deque(maxlen=max(8, RTSP_FPS * 2 + 1))
     tx_fps = 0.0
 
@@ -1433,18 +1943,48 @@ def pipeline():
             _now = time.time()
             dt_f = _now - t_last
             t_last = _now
-            if bgr is None:
+            if proc is None:
                 cam.release()
                 os._exit(1)
+            # bgr 은 렌더 주기에만 채워진다. 추정 전용 프레임에서는 None 이다.
+            if bgr is not None:
+                last_bgr = bgr
 
             follow, click, clear = state.begin_frame()
             frame_id += 1
 
             lfc_active = False
             if lfc is not None:
-                lfc.submit(bgr)
+                if bgr is not None:
+                    lfc.submit(bgr)
                 lfc_box, lfc_center, lfc_score, lfc_t = lfc.snapshot()
                 lfc_active = lfc_box is not None
+            if not lfc_active:
+                box_s, box_s_t, lfc_seen, meas_t = None, 0.0, 0.0, 0.0
+            elif stab.enabled:
+                # 평활 박스를 현재 프레임 좌표로 옮긴 뒤 새 측정과 비교한다.
+                # 이러면 차이가 표적 자신의 움직임만 남아 데드밴드가 의미를
+                # 가진다 (센서 좌표에서 재면 흔들림이 다 뚫고 지나간다).
+                if box_s is not None:
+                    Ts = stab.transport(box_s_t)
+                    if Ts is not None:
+                        box_s = xform_box(Ts, box_s)
+                box_s_t = stab.last_t()
+                if lfc_t > lfc_seen:
+                    fresh = lfc_score >= LFC_SCORE_MIN or not BOX_HOLD_LOW
+                    if fresh:
+                        Tm = stab.transport(lfc_t)
+                        meas = (xform_box(Tm, lfc_box) if Tm is not None
+                                else tuple(lfc_box))
+                        box_s = box_smooth(box_s, meas,
+                                           lfc_t - meas_t if meas_t else 0.0)
+                        meas_t = lfc_t
+                    lfc_seen = lfc_t
+                if box_s is not None:
+                    lfc_box = box_s
+                    lfc_center = (box_s[0] + 0.5 * box_s[2],
+                                  box_s[1] + 0.5 * box_s[3])
+                    lfc_t = box_s_t      # 이미 현재 프레임 좌표다
             pred_dx, pred_dy, pred_age = 0.0, 0.0, 0.0
             tgt = None
 
@@ -1474,11 +2014,11 @@ def pipeline():
                 else:
                     box = (capx - LFC_INIT_BOX / 2, capy - LFC_INIT_BOX / 2,
                            LFC_INIT_BOX, LFC_INIT_BOX)
-                snap_request(bgr, box, {"ts": _now, "frame_id": frame_id,
+                snap_request(last_bgr, box, {"ts": _now, "frame_id": frame_id,
                                         "zoom": round(ptz.state()[2], 3),
                                         "crop": list(crop) if crop else None})
-                if lfc is not None:
-                    lfc.request_start(bgr, box)
+                if lfc is not None and last_bgr is not None:
+                    lfc.request_start(last_bgr, box)
                     follow = True
                     state.set_follow(True)
                 elif tracker.start(proc, capx * PROC_SCALE, capy * PROC_SCALE):
@@ -1500,9 +2040,18 @@ def pipeline():
                     prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
                 elif follow:
                     tx, ty = c[0] / PROC_SCALE, c[1] / PROC_SCALE
-                    sx, sy = tx, ty
-                    tgt = (tx, ty)
+                    tgt = (tx, ty)      # FCC LOS 는 센서 기하라 원본을 쓴다
                     m_t = lfc_t if (lfc_active and lfc_t > 0.0) else _now
+                    # 측정 시점 -> 현재 프레임으로 옮긴 뒤 보정을 씌워
+                    # 안정화 화면 좌표로 만든다. 속도/예측/PTZ 목표를 전부 이
+                    # 좌표계에서 다뤄야 크롭창이 흔들림을 따라가 떨지 않는다.
+                    sx, sy = tx, ty
+                    if stab.enabled:
+                        T = stab.transport(m_t)
+                        if T is not None:
+                            sx, sy = apply_pt(T, sx, sy)
+                        if stab.warp is not None:
+                            sx, sy = apply_pt(stab.warp, sx, sy)
                     if prev_tgt is None:
                         prev_tgt, prev_tgt_t = (sx, sy), m_t
                     elif (sx, sy) != prev_tgt:
@@ -1523,41 +2072,70 @@ def pipeline():
                     ptz.set_target(sx + pred_dx + lx, sy + pred_dy + ly)
 
             cx, cy, win_w, win_h = ptz.window()
+            if stab.enabled:
+                # 보정에 쓸 여백만큼 크롭 창을 미리 줄여둔다 (offline BORDER_ZOOM)
+                win_w /= STAB_ZOOM
+                win_h /= STAB_ZOOM
             x0f, y0f = cx - win_w / 2.0, cy - win_h / 2.0
-            x0 = max(0, int(math.floor(x0f)))
-            y0 = max(0, int(math.floor(y0f)))
-            x1 = min(CAP_W, int(math.ceil(x0f + win_w)))
-            y1 = min(CAP_H, int(math.ceil(y0f + win_h)))
-            push_now = rtsp is not None and _now >= rtsp_next
+            push_now = (rtsp is not None and bgr is not None
+                        and _now >= rtsp_next)
             if push_now:
                 rtsp_next = max(_now - rtsp_period, rtsp_next) + rtsp_period
                 tx_hist.append(_now)
             if len(tx_hist) > 1 and tx_hist[-1] > tx_hist[0]:
                 tx_fps = (len(tx_hist) - 1) / (tx_hist[-1] - tx_hist[0])
 
-            if not push_now:
-                out = None
-            elif (x1 - x0) == OUT_W and (y1 - y0) == OUT_H:
-                out = bgr[y0:y1, x0:x1].copy()
-            else:
-                interp = cv2.INTER_AREA if (x1 - x0) > OUT_W else cv2.INTER_CUBIC
-                out = cv2.resize(bgr[y0:y1, x0:x1], (OUT_W, OUT_H), interpolation=interp)
+            stab_m = None
+            cw3 = None
+            if stab.enabled:
+                cw3 = np.array([
+                    [OUT_W / win_w, 0.0, -OUT_W / win_w * x0f],
+                    [0.0, OUT_H / win_h, -OUT_H / win_h * y0f],
+                    [0.0, 0.0, 1.0],
+                ], dtype=np.float64)
+                if _now >= stab_next:
+                    # 진동은 렌더 주기보다 빠를 수 있다. 추정을 렌더에 묶으면
+                    # 그 위 주파수가 접혀 들어와(aliasing) 느린 출렁임이 된다.
+                    stab_next = max(_now - stab_period, stab_next) + stab_period
+                    stab_m = stab.update(
+                        proc, lambda m: crop_fits(cw3, m),
+                        (max(1.0, min(x0f, CAP_W - (x0f + win_w))),
+                         max(1.0, min(y0f, CAP_H - (y0f + win_h)))))
+                else:
+                    # 지난 tick 의 크롭창으로 검증된 보정이다. 그 사이 PTZ 가
+                    # 센서 가장자리로 이동했을 수 있으니 다시 확인한다.
+                    stab_m = stab.warp
+                    if stab_m is not None and not crop_fits(cw3, stab_m):
+                        stab_m = None
 
-            sx = OUT_W / float(x1 - x0)
-            sy = OUT_H / float(y1 - y0)
-            M = np.array([
-                [sx, 0.0, -sx * x0],
-                [0.0, sy, -sy * y0],
-            ], dtype=np.float64)
+            # 여기서는 행렬만 만든다. 픽셀 작업은 렌더 스레드로 넘긴다.
+            if stab_m is not None:
+                rect = None
+                M = (cw3 @ np.vstack([stab_m, (0.0, 0.0, 1.0)]))[:2].copy()
+            else:
+                x0 = max(0, int(math.floor(x0f)))
+                y0 = max(0, int(math.floor(y0f)))
+                x1 = min(CAP_W, int(math.ceil(x0f + win_w)))
+                y1 = min(CAP_H, int(math.ceil(y0f + win_h)))
+                rect = (x0, y0, x1, y1)
+                sx = OUT_W / float(x1 - x0)
+                sy = OUT_H / float(y1 - y0)
+                M = np.array([
+                    [sx, 0.0, -sx * x0],
+                    [0.0, sy, -sy * y0],
+                ], dtype=np.float64)
+
+            Minv = cv2.invertAffineTransform(M)
 
             if tgt is not None:
+                # nx,ny 는 화면 기준 (조종수가 보는 위치와 일치해야 한다),
+                # yaw,pitch 는 광축 기준 (기체가 표적 위치를 계산하는 데 쓴다)
                 px, py = apply_pt(M, tgt[0], tgt[1])
-                vcx, vcy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
                 state.set_fcc_target(
                     True,
                     max(-1.0, min(1.0, (px - OUT_W / 2.0) / (OUT_W / 2.0))),
                     max(-1.0, min(1.0, (OUT_H / 2.0 - py) / (OUT_H / 2.0))),
-                    *target_angles(tgt[0], tgt[1], vcx, vcy))
+                    *target_angles(tgt[0], tgt[1]))
             else:
                 state.set_fcc_target(False, 0.0, 0.0, 0.0, 0.0)
 
@@ -1570,40 +2148,44 @@ def pipeline():
                         cam.sensor_dt_ms))
 
             _, _, zoom = ptz.state()
-            osd_master, osd_zoom = state.osd_flags()
-            if out is not None and osd_master:
-                label = f"{tx_fps:4.1f}fps"
-                if osd_zoom:
-                    label += f"  ZOOM:{zoom:.2f}x"
-                cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                            (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                            (0, 255, 128), 1, cv2.LINE_AA)
-            if out is not None and lfc_box is not None:
-                bx, by, bw, bh = lfc_box
-                bx += pred_dx
-                by += pred_dy
-                a = apply_pt(M, bx, by)
-                b = apply_pt(M, bx + bw, by + bh)
-                col = (0, 255, 255) if lfc_score >= LFC_SCORE_MIN else (0, 140, 255)
-                cv2.rectangle(out, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
-                              col, 2, cv2.LINE_AA)
-            elif out is not None and tracker.active and tracker.center is not None:
-                tx, ty = tracker.center[0] / PROC_SCALE, tracker.center[1] / PROC_SCALE
-                ox, oy = apply_pt(M, tx, ty)
-                cv2.circle(out, (int(ox), int(oy)), 18, (0, 255, 255), 2, cv2.LINE_AA)
+            if push_now:
+                osd_master, osd_zoom = state.osd_flags()
+                label = None
+                if osd_master:
+                    label = f"{tx_fps:4.1f}fps"
+                    if osd_zoom:
+                        label += f"  ZOOM:{zoom:.2f}x"
+                # 오버레이도 안정화 화면 좌표를 거쳐 그린다. 프레임 N 의
+                # 보정을 옛 측정에 씌우면 그 사이 카메라가 움직인 만큼
+                # 박스가 표적에서 밀린다 (흔들림 p95 55px/frame 기준 100px+).
+                Tb = stab.transport(lfc_t) if stab.enabled else None
+                box = trk = None
+                if lfc_box is not None:
+                    bx, by, bw, bh = lfc_box
+                    if Tb is not None:
+                        bx, by = apply_pt(Tb, bx, by)
+                        sc = math.hypot(Tb[0, 0], Tb[1, 0])
+                        bw *= sc
+                        bh *= sc
+                    a = apply_pt(M, bx + pred_dx, by + pred_dy)
+                    b = apply_pt(M, bx + bw + pred_dx, by + bh + pred_dy)
+                    col = ((0, 255, 255) if lfc_score >= LFC_SCORE_MIN
+                           else (0, 140, 255))
+                    box = (a, b, col)
+                elif tracker.active and tracker.center is not None:
+                    trk = apply_pt(M, tracker.center[0] / PROC_SCALE,
+                                   tracker.center[1] / PROC_SCALE)
+                renderer.submit((bgr, M, rect, label, box, trk))
 
             state.set_det_info(lfc.ms if lfc is not None else 0.0,
                                ("lightfc" if lfc_active else
                                 "lk" if tracker.active else "none"))
             state.set_track_box(lfc_box, lfc_score)
             state.set_pred(pred_age, pred_dx, pred_dy, tvx, tvy)
-            state.publish_frame(frame_id, cv2.invertAffineTransform(M),
+            state.publish_frame(frame_id, Minv,
                                 fps_ema, crop, zoom, tx_fps,
                                 frame_jitter(jit) if frame_id % 15 == 0 else None)
 
-            if out is not None:
-                rtsp.push(out)
             if STATUS_FILE and frame_id % STATUS_EVERY == 0:
                 try:
                     write_status(frame_id)
@@ -1612,6 +2194,7 @@ def pipeline():
             t_loop_end = time.perf_counter()
 
     finally:
+        renderer.stop()
         cam.release()
 
 
