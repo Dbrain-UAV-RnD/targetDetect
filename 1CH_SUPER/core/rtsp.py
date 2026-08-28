@@ -106,6 +106,7 @@ class RtspRenderer:
         self.dropped = 0
         self._run = True
         self._push_t = []
+        self._sbox = None
         threading.Thread(target=self._loop, daemon=True).start()
 
     def submit(self, bgr, box, zoom):
@@ -136,8 +137,19 @@ class RtspRenderer:
                 x0, y0 = (W - cw) // 2, (H - ch) // 2
                 out = cv2.resize(bgr[y0:y0 + ch, x0:x0 + cw],
                                  (RTSP_W, RTSP_H))
-                if box is not None:
-                    x, y, w, h = box
+                if box is None:
+                    self._sbox = None
+                else:
+                    if self._sbox is None or (
+                            abs(box[0] - self._sbox[0]) > box[2]
+                            or abs(box[1] - self._sbox[1]) > box[3]):
+                        self._sbox = tuple(box)
+                    else:
+                        a = 0.35
+                        self._sbox = tuple((1 - a) * s + a * b
+                                           for s, b in zip(self._sbox, box))
+                if self._sbox is not None:
+                    x, y, w, h = self._sbox
                     kx, ky = W / PROC_W, H / PROC_H
                     ox = (x * kx - x0) * RTSP_W / cw
                     oy = (y * ky - y0) * RTSP_H / ch

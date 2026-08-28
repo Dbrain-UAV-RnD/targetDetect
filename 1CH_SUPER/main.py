@@ -176,7 +176,7 @@ def fast_loop(app):
                                                       keep_ref=True)
                                     track_ok, box = True, tuple(sp_box)
                                     app.log.event(f"SNAPBACK {sp_box}")
-                        else:
+                        elif res["matches"] < max(4, REACQ_MIN_MATCHES // 2):
                             audit_fails += 1
                             if audit_fails >= AUDIT_FAILS:
                                 audit_fails = 0
