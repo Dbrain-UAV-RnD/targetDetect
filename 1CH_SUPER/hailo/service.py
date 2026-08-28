@@ -148,6 +148,7 @@ def service_main():
 
     last_fid = 0
     last_anchor_fid = -1
+    last_anchor_try = -100
     audit_cnt = 0
     ok_streak = 0
     try:
@@ -169,10 +170,15 @@ def service_main():
             try:
                 ab = ctrl.get("anchor_box")
                 afid = ctrl.get("anchor_fid", -1)
-                if ab is not None and afid != last_anchor_fid:
+                if (ab is not None and afid != last_anchor_fid
+                        and fid - last_anchor_try >= 30):
+                    last_anchor_try = fid
                     src = img if reacq.name == "superpoint" else _to_proc_gray(img)
-                    if reacq.set_anchor(src, ab):
+                    ok_anchor = reacq.set_anchor(src, ab)
+                    if ok_anchor:
                         last_anchor_fid = afid
+                    result_slot.write({"kind": "anchor", "ok": ok_anchor,
+                                       "t_frame": t_cap}, t_cap, fid)
                 elif ab is None and afid == -1 and reacq.ready:
                     reacq.clear()
                     last_anchor_fid = -1

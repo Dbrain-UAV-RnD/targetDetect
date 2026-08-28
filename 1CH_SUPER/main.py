@@ -159,6 +159,8 @@ def fast_loop(app):
                             audit_fails = 0
                         else:
                             app.log.event(f"REACQ_REJECT color {res['box']}")
+                    elif res["kind"] == "anchor" and not res["ok"]:
+                        app.log.event("ANCHOR_FAIL")
                     elif (res["kind"] == "audit" and app.tracker.active
                           and app.sm.state is State.TRACK):
                         sp_box = res["box"]
