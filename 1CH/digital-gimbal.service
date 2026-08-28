@@ -19,6 +19,8 @@ Environment=STAB_TAU=1.5
 Environment=OUT_W=1920
 Environment=OUT_H=1080
 Environment=LFC_RATE=24
+Environment=FLOW=1
+Environment=LFC_SCALE_SCORE=0.60
 Environment=RTSP_BITRATE=2500
 Environment=RTSP_PRESET=veryfast
 Environment=RTSP_CODEC=h264

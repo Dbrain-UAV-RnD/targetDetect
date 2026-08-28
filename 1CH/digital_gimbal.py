@@ -44,16 +44,11 @@ LK_PARAMS = dict(
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
 )
 
-# --- 실시간 영상 안정화 (offline stabilize_video.py 의 4-DOF similarity 방식) ---
 STAB_ENABLE   = os.environ.get("STAB", "1") not in ("0", "false", "no")
 STAB_W        = int(os.environ.get("STAB_W", "240"))
 STAB_H        = int(os.environ.get("STAB_H", str(max(2, int(round(
                     STAB_W * CAP_H / float(CAP_W) / 2.0)) * 2))))
 STAB_ZOOM     = float(os.environ.get("STAB_ZOOM", "1.15"))
-# 크롭으로 여백을 확보하는 대신 검은 테두리를 허용하는 모드. 화각을 온전히
-# 쓰는 대신 보정량만큼 가장자리가 비는데, 완전 무제한은 불가능하다 -
-# 지속적인 팬에서 보정량이 속도x tau (실측 3180px/s x 0.6s = 1908px) 까지
-# 자라 화면이 통째로 날아간다. 상한만 크게 열어둔다.
 STAB_FREE     = os.environ.get("STAB_FREE", "0") not in ("0", "false", "no")
 STAB_FREE_PX  = float(os.environ.get("STAB_FREE_PX", "200"))
 STAB_TAU      = float(os.environ.get("STAB_TAU", "0.60"))
@@ -64,17 +59,14 @@ STAB_QUALITY  = float(os.environ.get("STAB_QUALITY", "0.01"))
 STAB_MIN_DIST = 8
 STAB_MIN_PTS  = 12
 STAB_FB_ERR   = 1.0
-STAB_HIST     = int(os.environ.get("STAB_HIST", "96"))        # 보정 이력 길이
-STAB_DEAD     = float(os.environ.get("STAB_DEAD", "1.0"))     # capture px
+STAB_HIST     = int(os.environ.get("STAB_HIST", "96"))
+STAB_DEAD     = float(os.environ.get("STAB_DEAD", "1.0"))
 STAB_DEAD_DEG = float(os.environ.get("STAB_DEAD_DEG", "0.03"))
 STAB_WALL     = float(os.environ.get("STAB_WALL", "2.0"))
-STAB_STEP_MAX = float(os.environ.get("STAB_STEP_MAX", "0"))  # capture px/tick, 0=무제한
-STAB_DC_TAU   = float(os.environ.get("STAB_DC_TAU", "0"))     # 팬 DC 분리. 실측상
-                                                            # 손팬은 등속이 아니라 오히려 나빠져 기본 끔
-# 30Hz 로 낮추면 고주파 진동에서 오히려 안 켠 것보다 나쁜 순간이 생긴다
-# (실측: tap 영상 max 353px vs OFF 215px). 전속 추정이 필요하다.
+STAB_STEP_MAX = float(os.environ.get("STAB_STEP_MAX", "0"))
+STAB_DC_TAU   = float(os.environ.get("STAB_DC_TAU", "0"))
 STAB_RATE     = float(os.environ.get("STAB_RATE", str(FPS)))
-STAB_RS_MS    = float(os.environ.get("STAB_RS_MS", "0.0"))    # 센서 readout 시간
+STAB_RS_MS    = float(os.environ.get("STAB_RS_MS", "0.0"))
 STAB_RS_TAU   = float(os.environ.get("STAB_RS_TAU", "0.08"))
 STAB_KX       = CAP_W / float(STAB_W)
 STAB_KY       = CAP_H / float(STAB_H)
@@ -155,12 +147,36 @@ LFC_SCALE_HOLD   = float(os.environ.get("LFC_SCALE_HOLD",   "1.005"))
 LFC_SCALE_SCORE  = float(os.environ.get("LFC_SCALE_SCORE",  "0.70"))
 LFC_SCALE_MIN_PX = float(os.environ.get("LFC_SCALE_MIN_PX", "16")) * CAP_K
 LFC_SCALE_MAX_PX = float(os.environ.get("LFC_SCALE_MAX_PX", "0.75")) * CAP_H
-# --- 표적 박스 평활 (안정화 좌표계에서 판정한다) ---
 BOX_DEAD     = float(os.environ.get("BOX_DEAD", "8.0")) * CAP_K
 BOX_SPAN     = float(os.environ.get("BOX_SPAN", "12.0")) * CAP_K
 BOX_MIN      = float(os.environ.get("BOX_MIN", "0.15"))
-BOX_MAX_RATE = float(os.environ.get("BOX_MAX_RATE", "3000.0")) * CAP_K  # px/s
+BOX_MAX_RATE = float(os.environ.get("BOX_MAX_RATE", "3000.0")) * CAP_K
 BOX_HOLD_LOW = os.environ.get("BOX_HOLD_LOW", "1") not in ("0", "false", "no")
+
+FLOW_ENABLE   = os.environ.get("FLOW", "0") not in ("0", "false", "no")
+FLOW_MAX_PTS  = int(os.environ.get("FLOW_PTS", "24"))
+FLOW_MIN_PTS  = int(os.environ.get("FLOW_MIN_PTS", "6"))
+FLOW_QUALITY  = float(os.environ.get("FLOW_QUALITY", "0.01"))
+FLOW_MIN_DIST = max(3.0, 6.0 * CAP_K)
+FLOW_FB_ERR   = float(os.environ.get("FLOW_FB_ERR", "1.0")) * CAP_K
+FLOW_PAD      = float(os.environ.get("FLOW_PAD", "2.0"))
+FLOW_MASK     = 0.85
+FLOW_CROP_MAX = int(os.environ.get("FLOW_CROP_MAX", "320"))
+FLOW_MAX_PX_S = float(os.environ.get("FLOW_MAX_PX_S", "3000.0")) * CAP_K
+FLOW_ANCHOR_W = float(os.environ.get("FLOW_ANCHOR_W", "0.50"))
+FLOW_RESEED   = float(os.environ.get("FLOW_RESEED", "0.25"))
+FLOW_HIST     = int(os.environ.get("FLOW_HIST", "96"))
+LFC_BIG_FRAC    = float(os.environ.get("LFC_BIG_FRAC", "0.25"))
+LFC_BIG_HOLD    = os.environ.get("LFC_BIG_HOLD", "1") not in ("0", "false", "no")
+FLOW_SCALE_RATE = float(os.environ.get("FLOW_SCALE_RATE", "1.02"))
+
+LOST_BOX      = os.environ.get("LOST_BOX", "1") not in ("0", "false", "no")
+LOST_BOX_SEC  = float(os.environ.get("LOST_BOX_SEC", "0"))
+FLOW_LK = dict(
+    winSize=(21, 21),
+    maxLevel=3,
+    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+)
 
 LFC_IN_Z  = "lightfc_backbone_scope1/input_layer1"
 LFC_IN_X  = "lightfc_backbone_scope2/input_layer2"
@@ -249,7 +265,6 @@ def frame_jitter(samples):
 
 
 def stab_margin():
-    """안정화가 켜져 있으면 크롭창이 STAB_ZOOM 만큼 줄어 있다."""
     stab = STAB_REF.get("stab")
     if STAB_FREE or stab is None or not stab.enabled:
         return 1.0
@@ -257,7 +272,6 @@ def stab_margin():
 
 
 def xform_box(m, box):
-    """박스를 2x3 로 옮긴다 (중심 이동 + 스케일)."""
     x, y, w, h = box
     cx, cy = apply_pt(m, x + 0.5 * w, y + 0.5 * h)
     sc = math.hypot(m[0, 0], m[1, 0])
@@ -267,15 +281,6 @@ def xform_box(m, box):
 
 
 def box_smooth(prev, new, dt):
-    """표적 박스 데드밴드 + 속도 제한.
-
-    반드시 안정화 좌표계에서 비교해야 한다. 센서 좌표에서 재면 카메라
-    흔들림(실측 p95 55px/frame)이 매 프레임 데드밴드를 뚫고 지나가
-    평활 계수가 1.0 으로 포화돼 아무 효과가 없다.
-
-    표적이 물리적으로 낼 수 없는 속도로 튀는 것은 추적기가 다른 물체로
-    옮겨갔다는 뜻이므로, 그만큼만 따라가 급격한 점프를 막는다.
-    """
     if prev is None:
         return new
     px, py, pw, ph = prev
@@ -298,14 +303,11 @@ def box_smooth(prev, new, dt):
 
 
 def _fit_free(m):
-    """STAB_FREE 모드 - 센서 밖으로 나가도 검은 테두리로 보여준다."""
     return True
 
 
 def crop_fits(cw3, m):
-    """보정 m 을 적용해도 출력 창이 센서 프레임 밖으로 나가지 않는지 검사"""
     inv = cv2.invertAffineTransform((cw3 @ np.vstack([m, (0.0, 0.0, 1.0)]))[:2].copy())
-    # 겹선형 보간이 이웃 픽셀까지 읽으므로 1.5px 안쪽으로 여유를 둔다
     for px, py in ((0.0, 0.0), (OUT_W, 0.0), (0.0, OUT_H), (OUT_W, OUT_H)):
         qx, qy = apply_pt(inv, px, py)
         if qx < 1.5 or qy < 1.5 or qx > CAP_W - 1.5 or qy > CAP_H - 1.5:
@@ -533,6 +535,8 @@ class LightFCTracker:
         self.score = 0.0
         self.miss_t0 = None
         self.t_result = 0.0
+        self.t_frame = 0.0
+        self.hold = False
         self.ms = 0.0
         self.stage = collections.deque(maxlen=200)
         self.dump_n = 0
@@ -560,12 +564,14 @@ class LightFCTracker:
             self.score = 0.0
             self.miss_t0 = None
             self.t_result = 0.0
+            self.t_frame = 0.0
+            self.hold = False
             self.req = None
             self.pending = None
 
-    def submit(self, bgr):
+    def submit(self, bgr, t):
         with self.lock:
-            self.pending = bgr
+            self.pending = (bgr, t)
 
     def request_start(self, bgr, box):
         with self.lock:
@@ -601,6 +607,23 @@ class LightFCTracker:
             x, y, w, h = self.sbox
             return self.sbox, (x + 0.5 * w, y + 0.5 * h), self.score, self.t_result
 
+    def set_hold(self, on):
+        with self.lock:
+            self.hold = bool(on)
+
+    def retarget(self, box):
+        with self.lock:
+            if self.box is None:
+                return
+            self.box = tuple(float(v) for v in box)
+            self.sbox = self.box
+
+    def raw_snapshot(self):
+        with self.lock:
+            if self.box is None:
+                return None, 0.0, 0.0
+            return self.box, self.score, self.t_frame
+
     @staticmethod
     def _stab(prev, new):
         if prev is None:
@@ -624,8 +647,9 @@ class LightFCTracker:
         while True:
             with self.lock:
                 req, self.req = self.req, None
-                frame, self.pending = self.pending, None
+                pend, self.pending = self.pending, None
                 busy = self.box is not None
+            frame, t_cap = pend if pend is not None else (None, 0.0)
             try:
                 if req is not None:
                     if not self._start(req[0], req[1]):
@@ -635,7 +659,7 @@ class LightFCTracker:
                     time.sleep(0.003)
                     continue
                 t0 = time.time()
-                self._update(frame)
+                self._update(frame, t_cap)
                 el = time.time() - t0
                 with self.lock:
                     self.ms = el * 1000.0
@@ -690,6 +714,7 @@ class LightFCTracker:
             self.score = 1.0
             self.miss_t0 = None
             self.t_result = time.time()
+            self.t_frame = self.t_result
         return True
 
     def _infer(self, bgr, cur_box, cur_z):
@@ -756,7 +781,7 @@ class LightFCTracker:
         return (peak, (float(nx), float(ny), float(max(4.0, w)),
                        float(max(4.0, h))), raw_wh)
 
-    def _update(self, bgr):
+    def _update(self, bgr, t_cap):
         with self.lock:
             if self.box is None:
                 return None
@@ -790,6 +815,8 @@ class LightFCTracker:
                 if self.miss_t0 is None:
                     self.miss_t0 = time.time()
                 over = (time.time() - self.miss_t0) > LFC_MAX_MISS_SEC
+                if over and self.hold:
+                    over = False
             if over:
                 self.stop()
             return None
@@ -799,6 +826,7 @@ class LightFCTracker:
                 self.box = new_box
                 self.sbox = self._stab(self.sbox, new_box)
                 self.t_result = time.time()
+                self.t_frame = t_cap or self.t_result
 
         if LFC_TPL_ALPHA > 0.0 and peak >= LFC_TPL_MIN and not moving:
             nz, _ = self._crop(bgr, new_box, LFC_TEMPLATE_FACTOR, LFC_TEMPLATE)
@@ -810,6 +838,242 @@ class LightFCTracker:
                             self.z.astype(np.float32) * (1.0 - LFC_TPL_ALPHA)
                             + nz[None] * LFC_TPL_ALPHA, 0.0, 255.0).astype(np.uint8)
         return None
+
+
+class FlowTracker:
+
+    def __init__(self):
+        self.w = self.h = 0.0
+        self.reseeds = 0
+        self.anchors = 0
+        self.stop()
+
+    def stop(self):
+        self.pts = None
+        self.prev = None
+        self.rect = None
+        self.sx = self.sy = 1.0
+        self.cx = self.cy = 0.0
+        self.t = 0.0
+        self.hist = collections.deque(maxlen=FLOW_HIST)
+        self.last_m = None
+        self.own_size = False
+        self.pts_n = 0
+        self.fail = 0
+        self.corr = 0.0
+        self.ms = 0.0
+
+    @property
+    def active(self):
+        return self.pts is not None
+
+    def set_size(self, w, h):
+        self.w, self.h = float(w), float(h)
+
+    def set_own_size(self, on):
+        self.own_size = bool(on)
+
+    def box(self):
+        return (self.cx - 0.5 * self.w, self.cy - 0.5 * self.h, self.w, self.h)
+
+    @staticmethod
+    def _rect_for(box):
+        x, y, w, h = box
+        cx, cy = x + 0.5 * w, y + 0.5 * h
+        r = 0.5 * FLOW_PAD * max(w, h)
+        x0 = int(max(0, math.floor(cx - r)))
+        y0 = int(max(0, math.floor(cy - r)))
+        x1 = int(min(CAP_W, math.ceil(cx + r)))
+        y1 = int(min(CAP_H, math.ceil(cy + r)))
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            return None
+        return (x0, y0, x1, y1)
+
+    @staticmethod
+    def _gray(bgr, rect):
+        x0, y0, x1, y1 = rect
+        g = cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        w, h = x1 - x0, y1 - y0
+        s = min(1.0, FLOW_CROP_MAX / float(max(w, h)))
+        if s < 1.0:
+            ow, oh = max(8, int(round(w * s))), max(8, int(round(h * s)))
+            g = cv2.resize(g, (ow, oh), interpolation=cv2.INTER_AREA)
+            return g, ow / float(w), oh / float(h)
+        return g, 1.0, 1.0
+
+    def _to_crop(self, p):
+        q = np.empty_like(p)
+        q[:, 0, 0] = (p[:, 0, 0] - self.rect[0]) * self.sx
+        q[:, 0, 1] = (p[:, 0, 1] - self.rect[1]) * self.sy
+        return q
+
+    def _to_cap(self, q):
+        p = np.empty_like(q)
+        p[:, 0, 0] = self.rect[0] + q[:, 0, 0] / self.sx
+        p[:, 0, 1] = self.rect[1] + q[:, 0, 1] / self.sy
+        return p
+
+    def _seed(self, bgr, box):
+        rect = self._rect_for(box)
+        if rect is None:
+            return False
+        g, sx, sy = self._gray(bgr, rect)
+        x, y, w, h = box
+        cx, cy = x + 0.5 * w, y + 0.5 * h
+        mw, mh = 0.5 * w * FLOW_MASK, 0.5 * h * FLOW_MASK
+        mask = np.zeros(g.shape, np.uint8)
+        mx0 = int(max(0, round((cx - mw - rect[0]) * sx)))
+        my0 = int(max(0, round((cy - mh - rect[1]) * sy)))
+        mx1 = int(min(g.shape[1], round((cx + mw - rect[0]) * sx)))
+        my1 = int(min(g.shape[0], round((cy + mh - rect[1]) * sy)))
+        if mx1 - mx0 < 8 or my1 - my0 < 8:
+            return False
+        mask[my0:my1, mx0:mx1] = 255
+        p = cv2.goodFeaturesToTrack(
+            g, maxCorners=FLOW_MAX_PTS, qualityLevel=FLOW_QUALITY,
+            minDistance=max(2.0, FLOW_MIN_DIST * sx), blockSize=7, mask=mask)
+        if p is None or len(p) < FLOW_MIN_PTS:
+            return False
+        self.rect, self.sx, self.sy = rect, sx, sy
+        self.prev = g
+        self.pts = p.astype(np.float32)
+        self.pts_n = int(len(p))
+        return True
+
+    def _recenter(self, bgr, pts_cap):
+        rect = self._rect_for(self.box())
+        if rect is None:
+            return False
+        g, sx, sy = self._gray(bgr, rect)
+        q = np.empty_like(pts_cap)
+        q[:, 0, 0] = (pts_cap[:, 0, 0] - rect[0]) * sx
+        q[:, 0, 1] = (pts_cap[:, 0, 1] - rect[1]) * sy
+        inside = ((q[:, 0, 0] > 2) & (q[:, 0, 0] < g.shape[1] - 3) &
+                  (q[:, 0, 1] > 2) & (q[:, 0, 1] < g.shape[0] - 3))
+        if int(inside.sum()) < FLOW_MIN_PTS:
+            return False
+        self.rect, self.sx, self.sy = rect, sx, sy
+        self.prev = g
+        self.pts = np.ascontiguousarray(q[inside])
+        self.pts_n = int(inside.sum())
+        return True
+
+    def _lost(self):
+        self.fail += 1
+        self.pts = None
+        return None
+
+    def start(self, bgr, box, t):
+        self.stop()
+        if bgr is None or not self._seed(bgr, box):
+            self.pts = None
+            return False
+        self.set_size(box[2], box[3])
+        self.cx = box[0] + 0.5 * box[2]
+        self.cy = box[1] + 0.5 * box[3]
+        self.t = t
+        self.hist.append((t, self.cx, self.cy, np.eye(3)))
+        return True
+
+    def update(self, bgr, t):
+        if self.pts is None or bgr is None:
+            return None
+        t0 = time.perf_counter()
+        dt = max(1e-3, min(DT_MAX, t - self.t))
+        g, _, _ = self._gray(bgr, self.rect)
+
+        p0 = self.pts
+        guess, flags = None, 0
+        if self.last_m is not None:
+            cap = self._to_cap(p0)
+            pr = np.empty_like(cap)
+            m = self.last_m
+            pr[:, 0, 0] = m[0, 0] * cap[:, 0, 0] + m[0, 1] * cap[:, 0, 1] + m[0, 2]
+            pr[:, 0, 1] = m[1, 0] * cap[:, 0, 0] + m[1, 1] * cap[:, 0, 1] + m[1, 2]
+            guess = np.ascontiguousarray(self._to_crop(pr))
+            flags = cv2.OPTFLOW_USE_INITIAL_FLOW
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev, g, p0, guess,
+                                             flags=flags, **FLOW_LK)
+        if p1 is None:
+            return self._lost()
+        ok = st.ravel() == 1
+        pb, st2, _ = cv2.calcOpticalFlowPyrLK(g, self.prev, p1, None, **FLOW_LK)
+        if pb is not None:
+            err = np.linalg.norm((p0 - pb).reshape(-1, 2), axis=1) / max(1e-6, self.sx)
+            ok &= (st2.ravel() == 1) & (err < FLOW_FB_ERR)
+        a, b = p0[ok], p1[ok]
+        self.pts_n = int(len(a))
+        if self.pts_n < FLOW_MIN_PTS:
+            return self._lost()
+
+        m, _inl = cv2.estimateAffinePartial2D(
+            self._to_cap(a), self._to_cap(b),
+            method=cv2.RANSAC, ransacReprojThreshold=3.0)
+        if m is None:
+            return self._lost()
+
+        ncx, ncy = apply_pt(m, self.cx, self.cy)
+        if math.hypot(ncx - self.cx, ncy - self.cy) > FLOW_MAX_PX_S * dt:
+            return self._lost()
+
+        if self.own_size and self.w > 0.0:
+            sc = min(FLOW_SCALE_RATE,
+                     max(1.0 / FLOW_SCALE_RATE, math.hypot(m[0, 0], m[1, 0])))
+            k = math.sqrt(max(1e-6, self.w * self.h)) * sc
+            if LFC_SCALE_MIN_PX <= k <= LFC_SCALE_MAX_PX:
+                self.w *= sc
+                self.h *= sc
+
+        self.cx, self.cy = float(ncx), float(ncy)
+        self.t = t
+        self.last_m = m
+        self.fail = 0
+        self.hist.append((t, self.cx, self.cy, np.vstack([m, (0.0, 0.0, 1.0)])))
+
+        b_cap = self._to_cap(b)
+        self.prev, self.pts = g, b
+        if not self._recenter(bgr, b_cap) or self.pts_n < 2 * FLOW_MIN_PTS:
+            if self._seed(bgr, self.box()):
+                self.reseeds += 1
+            elif self.pts_n < FLOW_MIN_PTS:
+                return self._lost()
+        self.ms = (time.perf_counter() - t0) * 1e3
+        return (self.cx, self.cy)
+
+    def anchor(self, meas_cx, meas_cy, meas_t):
+        if self.pts is None or not self.hist:
+            return False
+        base_ts = None
+        for ts, cx, cy, _A in self.hist:
+            if ts <= meas_t:
+                base_ts, bx, by = ts, cx, cy
+            else:
+                break
+        if base_ts is None:
+            return False
+        ex, ey = meas_cx - bx, meas_cy - by
+
+        out = collections.deque(maxlen=FLOW_HIST)
+        for ts, cx, cy, A in self.hist:
+            if ts < base_ts:
+                out.append((ts, cx, cy, A))
+                continue
+            if ts > base_ts:
+                ex, ey = A[0, 0] * ex + A[0, 1] * ey, A[1, 0] * ex + A[1, 1] * ey
+            out.append((ts, cx + FLOW_ANCHOR_W * ex, cy + FLOW_ANCHOR_W * ey, A))
+        self.hist = out
+        self.cx, self.cy = out[-1][1], out[-1][2]
+        self.anchors += 1
+        self.corr = math.hypot(ex, ey)
+        return self.corr <= FLOW_RESEED * math.hypot(self.w, self.h)
+
+    def status(self):
+        return {"on": bool(self.pts is not None), "pts": self.pts_n,
+                "fail": self.fail, "reseed": self.reseeds,
+                "anchor": self.anchors, "corr": round(self.corr, 1),
+                "own": bool(self.own_size),
+                "wh": [round(self.w), round(self.h)],
+                "ms": round(self.ms, 2)}
 
 
 class TargetTracker:
@@ -882,44 +1146,24 @@ class TargetTracker:
 
 
 class FrameStabilizer:
-    """실시간 4-DOF(similarity) 영상 안정화.
-
-    오프라인 stabilize_video.py 와 같이 dx/dy/da 가 아니라 similarity 행렬
-    (a, b, tx, ty) 를 다룬다. 드론 접근처럼 프레임간 스케일이 변하는 장면에서
-    zoom 을 translation 으로 오인하지 않는다.
-
-    다만 오프라인처럼 절대 경로 A_i 를 누적하지는 않는다. 프레임간 추정의
-    미세한 스케일 편향이 곱셈으로 쌓여 정지 화면에서도 A 가 발산하기 때문이다
-    (실측: 80 프레임에 스케일 2.15 배). 대신 보정 행렬 W 자체를 상태로 두고
-
-        W <- leak(W . step^-1)
-
-    로 갱신한다. step^-1 은 카메라가 움직인 만큼 화면을 되돌리고, leak 은 W 를
-    항등 쪽으로 시정수 tau 로 놓아준다 - 즉 새는 적분기다. 편향이 쌓여도 leak
-    이 계속 지워내므로 발산하지 않고, 미래 프레임 없이도 인과적으로 동작한다.
-    """
 
     def __init__(self):
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         self.enabled = STAB_ENABLE
         self.tau = STAB_TAU
         self.ms = 0.0
-        # 옛 측정을 현재 프레임으로 옮기기 위한 프레임간 이동 이력
-        # (벽시계, step 3x3). 누적본이 아니라 낱개를 들고 있는다 - 누적하면
-        # 스케일 편향이 곱해져 시간이 지날수록 발산한다.
         self.hist = collections.deque(maxlen=STAB_HIST)
         self.reset()
 
     def request_reset(self):
-        """다른 스레드(GCS)에서 호출. update() 중간에 덮어써지지 않도록 플래그만 세운다."""
         self._reset_req = True
 
     def reset(self):
         self._reset_req = False
         self.hist.clear()
         self.prev = None
-        self.W = np.eye(3)          # 보정 행렬 (stab 좌표계) - 유일한 누적 상태
-        self.warp = None            # capture 좌표계 2x3, None 이면 항등
+        self.W = np.eye(3)
+        self.warp = None
         self.pts = 0
         self.fail = 0
         self.sat = 0.0
@@ -946,7 +1190,6 @@ class FrameStabilizer:
 
     @staticmethod
     def _track(prev, curr, p0):
-        """forward-backward 검증을 통과한 대응점만 반환"""
         p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, curr, p0, None, **STAB_LK)
         pb, stb, _ = cv2.calcOpticalFlowPyrLK(curr, prev, p1, None, **STAB_LK)
         err = np.linalg.norm(p0 - pb, axis=2).ravel()
@@ -955,7 +1198,6 @@ class FrameStabilizer:
 
     @staticmethod
     def _scale(W, s):
-        """보정량을 항등쪽으로 s 배 축소 (similarity 성질 유지)"""
         B = np.eye(3)
         B[0, 0] = B[1, 1] = 1.0 + s * (W[0, 0] - 1.0)
         B[1, 0] = s * W[1, 0]
@@ -966,10 +1208,6 @@ class FrameStabilizer:
 
     @staticmethod
     def _to_capture(W):
-        """stab 좌표계 -> capture 좌표계. diag(Kx,Ky) . W . diag(Kx,Ky)^-1 켤레변환.
-
-        축 배율이 다르면 비대각 항도 바뀐다. 그냥 복사하면 skew 를 넣어버린다.
-        """
         m = np.eye(3)
         m[0, 0] = W[0, 0]
         m[1, 1] = W[1, 1]
@@ -980,13 +1218,6 @@ class FrameStabilizer:
         return m
 
     def _rolling_shutter(self):
-        """롤링셔터 un-skew.
-
-        행 y 는 행 0 보다 (y/H)*T_r 만큼 늦게 읽히므로, 그 사이 이동한 만큼
-        내용이 밀려 찍힌다 -> 1차 근사로 x 는 y 에 비례한 shear, y 는 세로
-        스케일 오차가 된다. 둘 다 affine 이라 기존 warp 에 그냥 곱하면 된다.
-        중앙 행이 고정되도록 오프셋을 준다.
-        """
         if STAB_RS_MS <= 0.0:
             return None
         r = (STAB_RS_MS / 1000.0) / float(CAP_H)
@@ -999,10 +1230,6 @@ class FrameStabilizer:
 
     @staticmethod
     def _deadzone(W):
-        """추정 잡음 수준의 미세 보정은 버린다 - 흔들리지 않는 화면을 흔들지 않게.
-
-        하드 임계가 아니라 크기에서 빼는 soft threshold 라 경계에서 튀지 않는다.
-        """
         tx, ty = W[0, 2] * STAB_KX, W[1, 2] * STAB_KY
         d = math.hypot(tx, ty)
         if d > 1e-9:
@@ -1019,12 +1246,6 @@ class FrameStabilizer:
         return W
 
     def update(self, proc, fit, budget):
-        """proc(그레이스케일)로 보정 행렬 갱신.
-
-        fit(2x3)->bool 이 센서 여유를 판정하고, budget 은 축별 허용 이동량
-        (bx, by) 이다. 세로 여유가 가로보다 훨씬 좁으므로 스칼라로 뭉뚱그리면
-        가로 보정을 필요 이상으로 죽인다.
-        """
         if not self.enabled or proc is None:
             self.warp = None
             return None
@@ -1056,7 +1277,6 @@ class FrameStabilizer:
             self.pts = 0
         self.prev = g
 
-        # 추정 실패 시 직전 모션을 이어가는 대신 항등으로 둔다
         if m is None:
             self.fail += 1
             step = np.eye(3)
@@ -1069,10 +1289,6 @@ class FrameStabilizer:
             self.vx += av * (step[0, 2] * STAB_KX / dt - self.vx)
             self.vy += av * (step[1, 2] * STAB_KY / dt - self.vy)
 
-        # 의도한 팬과 흔들림을 주파수로 가른다. 팬은 지속적이라 step 의 DC
-        # 성분으로 나타나고, 흔들림은 진동적이라 DC 가 0 이다. DC 를 빼고
-        # 적분하면 팬은 그대로 통과하고 흔들림만 보정된다. 진폭으로 가르면
-        # 큰 진동과 팬이 겹쳐 구분이 안 된다.
         if STAB_DC_TAU > 0.0 and dt > 0.0:
             a_dc = 1.0 - math.exp(-dt / STAB_DC_TAU)
             self.dcx += a_dc * (step[0, 2] - self.dcx)
@@ -1089,7 +1305,6 @@ class FrameStabilizer:
                 step[0, 2] *= f
                 step[1, 2] *= f
 
-        # W <- W . step^-1 : 카메라가 움직인 만큼 화면을 되돌린다
         det = step[0, 0] ** 2 + step[1, 0] ** 2
         if det < 1e-9:
             step_inv = np.eye(3)
@@ -1102,14 +1317,12 @@ class FrameStabilizer:
             step_inv[1, 2] = -(step_inv[1, 0] * step[0, 2] + step_inv[1, 1] * step[1, 2])
         W = self.W @ step_inv
 
-        # 보정량이 여유 한계에 가까울수록 빨리 놓아준다. 이 soft wall 이 없으면
-        # 매 프레임 하드 클램프에 걸렸다 풀렸다 하며 보정량이 출렁여 젤리가 된다.
         u = min(1.0, max(abs(W[0, 2]) * STAB_KX / budget[0],
                          abs(W[1, 2]) * STAB_KY / budget[1]))
         tau = self.tau / (1.0 + STAB_WALL * u * u)
 
         alpha = 1.0 - math.exp(-dt / tau) if dt > 0.0 else 0.0
-        W = self._scale(W, 1.0 - alpha)      # leak: 항등 쪽으로 놓아준다
+        W = self._scale(W, 1.0 - alpha)
         self.W = W
 
         W = self._deadzone(W.copy())
@@ -1122,7 +1335,6 @@ class FrameStabilizer:
         s = 1.0
         total = compose(1.0)
         if not fit(total[:2]):
-            # soft wall 을 넘어선 경우의 최후 안전장치
             lo, hi = 0.0, 1.0
             for _ in range(6):
                 mid = (lo + hi) / 2.0
@@ -1133,10 +1345,9 @@ class FrameStabilizer:
             s = lo
             total = compose(s)
             if not fit(total[:2]):
-                # RS 보정만으로도 여유를 넘는 경우가 있다. 최후엔 항등.
                 total = np.eye(3)
                 s = 0.0
-            self.W = self._scale(self.W, s)       # anti-windup
+            self.W = self._scale(self.W, s)
         self.sat = 1.0 - s
         self.warp = np.ascontiguousarray(total[:2])
         self.hist.append((time.time(), step))
@@ -1147,13 +1358,6 @@ class FrameStabilizer:
         return self.hist[-1][0] if self.hist else 0.0
 
     def transport(self, t):
-        """시각 t 의 센서 좌표를 현재 프레임 센서 좌표로 옮기는 2x3.
-
-        트래커 결과는 몇 프레임 전 좌표다. 그 사이 카메라가 움직인 만큼
-        표적의 센서 위치도 옮겨갔으므로, 그대로 그리면 밀린다. 여기서
-        되돌리면 남는 오차는 표적 자신의 실제 움직임뿐이다 - 속도 예측
-        같은 근사가 아니라 측정된 프레임간 이동을 그대로 곱한다.
-        """
         if not self.hist:
             return None
         T = None
@@ -1352,16 +1556,6 @@ class RtspServer:
 
 
 class Renderer:
-    """크롭/보정 warp + OSD + RTSP push 를 캡처 루프에서 분리한다.
-
-    1080p warp 는 부하 상태에서 20ms 를 넘어 60fps 캡처 루프 예산(16.7ms)
-    안에 들어가지 않는다. 루프 안에 두면 프레임을 버리게 되고, 그러면 모션
-    추정 간격이 들쭉날쭉해져 고주파 진동이 접혀 들어와(aliasing) 젤리가
-    된다 - 실측에서 60.9fps 가 22fps 로, work_med 0.2ms 가 41.6ms 로 갔다.
-
-    최신 한 장만 들고 있다가 다른 코어에서 렌더하고, 밀리면 버린다. 표시
-    경로라 오래된 프레임을 붙잡느니 최신 프레임을 그리는 쪽이 항상 낫다.
-    """
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -1376,7 +1570,7 @@ class Renderer:
     def submit(self, job):
         with self.cv:
             if self.job is not None:
-                self.dropped += 1      # 렌더가 밀렸다 - 오래된 쪽을 버린다
+                self.dropped += 1
             self.job = job
             self.cv.notify()
 
@@ -1454,6 +1648,7 @@ class SharedState:
                      "on": PRED_ENABLE}
         self.track_box = None
         self.track_score = 0.0
+        self.lost_box = None
         self.show_det = True
         self.stats = {"fps": 0.0, "crop": None, "zoom": 1.0}
         self.osd_master = True
@@ -1541,6 +1736,7 @@ class SharedState:
             s["show_det"] = self.show_det
             s["track_box"] = self.track_box
             s["track_score"] = self.track_score
+            s["lost_box"] = self.lost_box
             s["pred"] = dict(self.pred)
             s["rotate"] = list(self.rotate)
             s["center"] = self.center_pending
@@ -1576,6 +1772,11 @@ class SharedState:
             self.track_box = ([round(float(v), 1) for v in box] if box is not None else None)
             self.track_score = round(float(score), 3)
 
+    def set_lost_box(self, box):
+        with self.lock:
+            self.lost_box = ([round(float(v), 1) for v in box]
+                             if box is not None else None)
+
     def set_pred(self, age, dx, dy, vx, vy):
         with self.lock:
             self.pred = {"age_ms": round(age * 1e3, 1),
@@ -1602,6 +1803,7 @@ CAMERA_REF = {}
 LFC_REF = {}
 STAB_REF = {}
 RENDER_REF = {}
+FLOW_REF = {}
 
 ptz = VirtualPTZ()
 state = SharedState()
@@ -1613,14 +1815,6 @@ def _off_axis_rad(px, half, tan_half):
 
 
 def target_angles(tx, ty):
-    """광축(센서 중심) 기준 표적 시선각.
-
-    FCC 는 이 각도와 기체 자세로 표적 위치를 계산하므로 카메라 보어사이트
-    기준이어야 한다. 예전에는 화면 중심각을 빼서 "화면 중심 기준 상대각"
-    이었는데, 그러면 디지털 팬으로 크롭창이 광축에서 벗어난 만큼 그대로
-    오차가 됐다 (줌 2배 최대 팬에서 yaw 9.1도, 5배에서 14.4도). 줌 1배에서는
-    크롭창이 광축과 일치해 오차가 0이라 드러나지 않았다.
-    """
     return (math.degrees(_off_axis_rad(tx, CAP_W / 2.0, CAM_HFOV_TAN)),
             math.degrees(-_off_axis_rad(ty, CAP_H / 2.0, CAM_VFOV_TAN)))
 
@@ -1637,7 +1831,6 @@ def _xor8(body):
 
 
 FCC_CHECKSUM = _sum8
-# FCC_CHECKSUM = _xor8
 
 
 def _deg_x10(v):
@@ -1910,6 +2103,12 @@ def write_status(frame_id):
     renderer = RENDER_REF.get("renderer")
     if renderer is not None:
         st["render"] = renderer.stats()
+    flow = FLOW_REF.get("flow")
+    if flow is not None:
+        st["flow"] = flow.status()
+        lfc0 = LFC_REF.get("lfc")
+        if lfc0 is not None:
+            st["flow"]["hold"] = bool(lfc0.hold)
     lfc = LFC_REF.get("lfc")
     if lfc is not None:
         sg = lfc.stage_stats()
@@ -1925,6 +2124,9 @@ def pipeline():
     cam = Camera(CAMERA_INDEX, CAP_W, CAP_H, FPS)
     CAMERA_REF["cam"] = cam
     tracker = TargetTracker()
+    flow = FlowTracker() if FLOW_ENABLE else None
+    if flow is not None:
+        FLOW_REF["flow"] = flow
     stab = FrameStabilizer()
     STAB_REF["stab"] = stab
     renderer = Renderer()
@@ -1944,6 +2146,8 @@ def pipeline():
     frame_id = 0
     lfc_box, lfc_center, lfc_score, lfc_t = None, None, 0.0, 0.0
     box_s, box_s_t, lfc_seen, meas_t = None, 0.0, 0.0, 0.0
+    flow_seen = 0.0
+    live_box, dead_box, dead_t = None, None, 0.0
     last_bgr = None
     rtsp_period = 1.0 / max(1, RTSP_FPS)
     rtsp_next = 0.0
@@ -1963,7 +2167,6 @@ def pipeline():
             if proc is None:
                 cam.release()
                 os._exit(1)
-            # bgr 은 렌더 주기에만 채워진다. 추정 전용 프레임에서는 None 이다.
             if bgr is not None:
                 last_bgr = bgr
 
@@ -1973,15 +2176,48 @@ def pipeline():
             lfc_active = False
             if lfc is not None:
                 if bgr is not None:
-                    lfc.submit(bgr)
+                    lfc.submit(bgr, _now)
                 lfc_box, lfc_center, lfc_score, lfc_t = lfc.snapshot()
                 lfc_active = lfc_box is not None
+
+            flow_on = False
+            if flow is not None:
+                if not lfc_active:
+                    flow.stop()
+                    flow_seen = 0.0
+                else:
+                    raw_box, raw_score, raw_t = lfc.raw_snapshot()
+                    big = (LFC_BIG_HOLD and raw_box is not None and
+                           max(raw_box[2] / CAP_W, raw_box[3] / CAP_H) >= LFC_BIG_FRAC)
+                    lost = raw_score < LFC_SCORE_MIN
+                    flow.set_own_size(big and lost)
+                    if raw_box is not None and not flow.own_size:
+                        flow.set_size(raw_box[2], raw_box[3])
+                    fc = flow.update(bgr, _now) if flow.active else None
+                    lfc.set_hold(big and fc is not None)
+                    if big and lost and fc is not None:
+                        lfc.retarget(flow.box())
+                    if raw_box is not None and raw_t > flow_seen:
+                        flow_seen = raw_t
+                        if raw_score >= LFC_SCORE_MIN:
+                            if fc is None or not flow.anchor(
+                                    raw_box[0] + 0.5 * raw_box[2],
+                                    raw_box[1] + 0.5 * raw_box[3], raw_t):
+                                fc = ((flow.cx, flow.cy)
+                                      if flow.start(bgr, raw_box, _now) else None)
+                    if fc is not None and raw_box is not None:
+                        bw, bh = ((flow.w, flow.h) if flow.own_size
+                                  else (raw_box[2], raw_box[3]))
+                        lfc_box = (fc[0] - 0.5 * bw, fc[1] - 0.5 * bh, bw, bh)
+                        lfc_center = fc
+                        lfc_t = _now
+                        flow_on = True
+
             if not lfc_active:
                 box_s, box_s_t, lfc_seen, meas_t = None, 0.0, 0.0, 0.0
+            elif flow_on:
+                box_s, box_s_t, lfc_seen, meas_t = None, 0.0, 0.0, 0.0
             elif stab.enabled:
-                # 평활 박스를 현재 프레임 좌표로 옮긴 뒤 새 측정과 비교한다.
-                # 이러면 차이가 표적 자신의 움직임만 남아 데드밴드가 의미를
-                # 가진다 (센서 좌표에서 재면 흔들림이 다 뚫고 지나간다).
                 if box_s is not None:
                     Ts = stab.transport(box_s_t)
                     if Ts is not None:
@@ -2001,7 +2237,15 @@ def pipeline():
                     lfc_box = box_s
                     lfc_center = (box_s[0] + 0.5 * box_s[2],
                                   box_s[1] + 0.5 * box_s[3])
-                    lfc_t = box_s_t      # 이미 현재 프레임 좌표다
+                    lfc_t = box_s_t
+            if lfc_active and lfc_box is not None:
+                live_box, dead_box = lfc_box, None
+            elif live_box is not None:
+                dead_box, dead_t, live_box = live_box, _now, None
+            if (dead_box is not None and LOST_BOX_SEC > 0.0
+                    and _now - dead_t > LOST_BOX_SEC):
+                dead_box = None
+
             pred_dx, pred_dy, pred_age = 0.0, 0.0, 0.0
             tgt = None
 
@@ -2012,6 +2256,8 @@ def pipeline():
 
             if clear:
                 tracker.stop()
+                live_box, dead_box = None, None
+                if flow is not None: flow.stop()
                 if lfc is not None: lfc.stop()
                 follow = False
                 prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
@@ -2019,6 +2265,7 @@ def pipeline():
             inv = state.inv_for(click[2]) if click is not None else None
             if click is not None and inv is not None:
                 capx, capy = apply_pt(inv, click[0], click[1])
+                live_box, dead_box = None, None
                 prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
                 tracker.stop()
                 if lfc is not None:
@@ -2036,6 +2283,9 @@ def pipeline():
                                         "crop": list(crop) if crop else None})
                 if lfc is not None and last_bgr is not None:
                     lfc.request_start(last_bgr, box)
+                    if flow is not None:
+                        flow.start(last_bgr, box, _now)
+                        flow_seen = 0.0
                     follow = True
                     state.set_follow(True)
                 elif tracker.start(proc, capx * PROC_SCALE, capy * PROC_SCALE):
@@ -2057,11 +2307,8 @@ def pipeline():
                     prev_tgt, prev_tgt_t, tvx, tvy = None, 0.0, 0.0, 0.0
                 elif follow:
                     tx, ty = c[0] / PROC_SCALE, c[1] / PROC_SCALE
-                    tgt = (tx, ty)      # FCC LOS 는 센서 기하라 원본을 쓴다
+                    tgt = (tx, ty)
                     m_t = lfc_t if (lfc_active and lfc_t > 0.0) else _now
-                    # 측정 시점 -> 현재 프레임으로 옮긴 뒤 보정을 씌워
-                    # 안정화 화면 좌표로 만든다. 속도/예측/PTZ 목표를 전부 이
-                    # 좌표계에서 다뤄야 크롭창이 흔들림을 따라가 떨지 않는다.
                     sx, sy = tx, ty
                     if stab.enabled:
                         T = stab.transport(m_t)
@@ -2090,7 +2337,6 @@ def pipeline():
 
             cx, cy, win_w, win_h = ptz.window()
             if stab.enabled and not STAB_FREE:
-                # 보정에 쓸 여백만큼 크롭 창을 미리 줄여둔다 (offline BORDER_ZOOM)
                 win_w /= STAB_ZOOM
                 win_h /= STAB_ZOOM
             x0f, y0f = cx - win_w / 2.0, cy - win_h / 2.0
@@ -2118,18 +2364,13 @@ def pipeline():
                     budget = (max(1.0, min(x0f, CAP_W - (x0f + win_w))),
                               max(1.0, min(y0f, CAP_H - (y0f + win_h))))
                 if _now >= stab_next:
-                    # 진동은 렌더 주기보다 빠를 수 있다. 추정을 렌더에 묶으면
-                    # 그 위 주파수가 접혀 들어와(aliasing) 느린 출렁임이 된다.
                     stab_next = max(_now - stab_period, stab_next) + stab_period
                     stab_m = stab.update(proc, fit, budget)
                 else:
-                    # 지난 tick 의 크롭창으로 검증된 보정이다. 그 사이 PTZ 가
-                    # 센서 가장자리로 이동했을 수 있으니 다시 확인한다.
                     stab_m = stab.warp
                     if stab_m is not None and not fit(stab_m):
                         stab_m = None
 
-            # 여기서는 행렬만 만든다. 픽셀 작업은 렌더 스레드로 넘긴다.
             if stab_m is not None:
                 rect = None
                 M = (cw3 @ np.vstack([stab_m, (0.0, 0.0, 1.0)]))[:2].copy()
@@ -2149,8 +2390,6 @@ def pipeline():
             Minv = cv2.invertAffineTransform(M)
 
             if tgt is not None:
-                # nx,ny 는 화면 기준 (조종수가 보는 위치와 일치해야 한다),
-                # yaw,pitch 는 광축 기준 (기체가 표적 위치를 계산하는 데 쓴다)
                 px, py = apply_pt(M, tgt[0], tgt[1])
                 state.set_fcc_target(
                     True,
@@ -2176,10 +2415,8 @@ def pipeline():
                     label = f"{tx_fps:4.1f}fps"
                     if osd_zoom:
                         label += f"  ZOOM:{zoom:.2f}x"
-                # 오버레이도 안정화 화면 좌표를 거쳐 그린다. 프레임 N 의
-                # 보정을 옛 측정에 씌우면 그 사이 카메라가 움직인 만큼
-                # 박스가 표적에서 밀린다 (흔들림 p95 55px/frame 기준 100px+).
-                Tb = stab.transport(lfc_t) if stab.enabled else None
+                Tb = (stab.transport(lfc_t)
+                      if (stab.enabled and not flow_on) else None)
                 box = trk = None
                 if lfc_box is not None:
                     bx, by, bw, bh = lfc_box
@@ -2193,15 +2430,22 @@ def pipeline():
                     col = ((0, 255, 255) if lfc_score >= LFC_SCORE_MIN
                            else (0, 140, 255))
                     box = (a, b, col)
+                elif dead_box is not None and LOST_BOX:
+                    a = apply_pt(M, dead_box[0], dead_box[1])
+                    b = apply_pt(M, dead_box[0] + dead_box[2],
+                                 dead_box[1] + dead_box[3])
+                    box = (a, b, (0, 0, 255))
                 elif tracker.active and tracker.center is not None:
                     trk = apply_pt(M, tracker.center[0] / PROC_SCALE,
                                    tracker.center[1] / PROC_SCALE)
                 renderer.submit((bgr, M, rect, label, box, trk))
 
             state.set_det_info(lfc.ms if lfc is not None else 0.0,
-                               ("lightfc" if lfc_active else
+                               ("flow" if flow_on else
+                                "lightfc" if lfc_active else
                                 "lk" if tracker.active else "none"))
             state.set_track_box(lfc_box, lfc_score)
+            state.set_lost_box(dead_box)
             state.set_pred(pred_age, pred_dx, pred_dy, tvx, tvy)
             state.publish_frame(frame_id, Minv,
                                 fps_ema, crop, zoom, tx_fps,
