@@ -103,6 +103,7 @@ def fast_loop(app):
                   on_center=app.on_center, on_zoom_rate=zoom.set_rate,
                   on_zoom_abs=zoom.set_zoom, zoom=zoom.value,
                   on_stab_mode=stab.set_mode, on_stab_alpha=stab.set_alpha,
+                  on_ai_mode=stab.set_mode,
                   view=lambda: stab.view(zoom.value())).start()
     fcc = FccLink(app.fcc_command).start()
 
