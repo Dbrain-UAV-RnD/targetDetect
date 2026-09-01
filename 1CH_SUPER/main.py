@@ -10,13 +10,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import (CAP_W, CAP_H, PROC_W, PROC_H, CAM_INDEX,
                     SHM_FRAME, SHM_RESULT, SHM_CTRL, FAST_LOOP_CORES,
                     HAILO_RESULT_MAX_AGE_S, REACQ_MIN_MATCHES, AUDIT_FAILS,
-                    RTSP_ENABLE, RTSP_FPS)
+                    TERM_HOLD_FRAC, RTSP_ENABLE, RTSP_FPS)
 from core.camera import Camera
 from core.tracker import make_tracker
 from core.state_machine import StateMachine, State
 from core.control import control_step, CmdFilter
 from core.watchdog import Watchdog
-from core.ptz import DigitalZoom
+from core.ptz import DigitalZoom, FollowPan
 from core.stab import Stabilizer
 from core.latency import LatencyLog
 from core.shm import FrameSlot, BlobSlot
@@ -99,16 +99,29 @@ def fast_loop(app):
     bumper = Bumper()
     wdg = Watchdog(app.on_trip, logger=app.log)
     zoom = DigitalZoom()
+    follow = FollowPan()
+
+    def view_now():
+        # 다운링크 뷰 = 안정화 오프셋 + 타깃 추종 팬, 크롭이 프레임을
+        # 벗어나지 않게 합산 후 클램프 (클릭 역변환·nx/ny·렌더러 공용)
+        z, ox, oy = stab.view(zoom.value())
+        fx, fy = follow.offset()
+        sx = (PROC_W - PROC_W / z) / 2.0
+        sy = (PROC_H - PROC_H / z) / 2.0
+        return (z, max(-sx, min(sx, ox + fx)),
+                max(-sy, min(sy, oy + fy)))
+
     gcs = GcsLink(on_track=app.on_track, on_clear=app.on_clear,
                   on_center=app.on_center, on_zoom_rate=zoom.set_rate,
                   on_zoom_abs=zoom.set_zoom, zoom=zoom.value,
                   on_stab_mode=stab.set_mode, on_stab_alpha=stab.set_alpha,
                   on_ai_mode=stab.set_mode,
-                  view=lambda: stab.view(zoom.value())).start()
+                  view=view_now).start()
     fcc = FccLink(app.fcc_command).start()
 
     cmdf = CmdFilter()
     frame_id = 0
+    box = None
     audit_fails = 0
     last_result_seq = 0
     anchor_box, anchor_fid = None, -1
@@ -120,7 +133,7 @@ def fast_loop(app):
             bgr, proc, gray, t_cap = cam.read()
             frame_id += 1
             wdg.feed()
-            stab.update(gray, t_cap)
+            ego_d = stab.update(gray, t_cap, box)
             frame_slot.write(bgr, t_cap, frame_id)
             t0 = time.perf_counter()
 
@@ -144,6 +157,9 @@ def fast_loop(app):
                 audit_fails = 0
                 anchor_box, anchor_fid = box, frame_id
 
+            if (ego_d is not None and app.tracker.active
+                    and getattr(app.tracker, "frac", 1.0) < TERM_HOLD_FRAC):
+                app.tracker.feedforward(float(ego_d[0]), float(ego_d[1]))
             track_ok, box = (app.tracker.update(proc)
                              if app.tracker.active else (False, None))
             t1 = time.perf_counter()
@@ -184,7 +200,9 @@ def fast_loop(app):
                                                       keep_ref=True)
                                     track_ok, box = True, tuple(sp_box)
                                     app.log.event(f"SNAPBACK {sp_box}")
-                        elif res["matches"] < max(4, REACQ_MIN_MATCHES // 2):
+                        elif (res["matches"] < max(4, REACQ_MIN_MATCHES // 2)
+                              and getattr(app.tracker, "frac", 0.0)
+                                  < TERM_HOLD_FRAC):
                             audit_fails += 1
                             if audit_fails >= AUDIT_FAILS:
                                 audit_fails = 0
@@ -196,7 +214,9 @@ def fast_loop(app):
 
             state = app.sm.step(track_ok, tof.latest_m, app.depth_m,
                                 bumper.pressed)
-            cmd = cmdf.step(state, control_step(state, box, app.depth_m), box)
+            follow.update(box)
+            cmd = cmdf.step(state, control_step(state, box, app.depth_m,
+                                                view_now()), box)
             with app.lock:
                 app.cmd = cmd
             t2 = time.perf_counter()
@@ -221,7 +241,7 @@ def fast_loop(app):
                 now = time.monotonic()
                 if now >= rtsp_next:
                     rtsp_next = max(rtsp_next + rtsp_period, now)
-                    renderer.submit(bgr, box, zoom.value())
+                    renderer.submit(bgr, box, zoom.value(), view_now())
     finally:
         ctrl_slot.write({"quit": True}, time.monotonic())
         time.sleep(0.1)

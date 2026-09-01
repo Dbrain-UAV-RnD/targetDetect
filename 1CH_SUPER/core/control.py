@@ -17,6 +17,14 @@ def target_angles(cx, cy):
     return yaw, pitch
 
 
+def _soft_deadband(e, band):
+    if e > band:
+        return e - band
+    if e < -band:
+        return e + band
+    return 0.0
+
+
 def speed_profile(depth_m, state):
     if state in (State.IDLE, State.REACQUIRE, State.CONTACT, State.ESTOP):
         return 0.0
@@ -30,19 +38,20 @@ def speed_profile(depth_m, state):
     return (0.15 + 0.85 * f) * SPEED_MAX
 
 
-def control_step(state, box, depth_m):
+def control_step(state, box, depth_m, view=None):
     if state in (State.TRACK, State.TERMINAL) and box is not None:
         x, y, w, h = box
         cx, cy = x + w / 2.0, y + h / 2.0
-        if abs(cx - PROC_W / 2.0) < DEADBAND_FRAC * PROC_W / 2.0:
-            cx = PROC_W / 2.0
-        if abs(cy - PROC_H / 2.0) < DEADBAND_FRAC * PROC_H / 2.0:
-            cy = PROC_H / 2.0
-        yaw, pitch = target_angles(cx, cy)
+        ex = _soft_deadband(cx - PROC_W / 2.0, DEADBAND_FRAC * PROC_W / 2.0)
+        ey = _soft_deadband(cy - PROC_H / 2.0, DEADBAND_FRAC * PROC_H / 2.0)
+        yaw, pitch = target_angles(PROC_W / 2.0 + ex, PROC_H / 2.0 + ey)
         yaw_rate = max(-YAW_RATE_MAX, min(YAW_RATE_MAX, YAW_KP * yaw))
+        # nx/ny는 지상국 OSD용: 다운링크 영상(줌+안정화 크롭) 좌표계로 투영
+        z, ox, oy = view if view is not None else (1.0, 0.0, 0.0)
+        hw, hh = PROC_W / 2.0, PROC_H / 2.0
         return {"valid": True,
-                "nx": max(-1.0, min(1.0, (cx - PROC_W / 2.0) / (PROC_W / 2.0))),
-                "ny": max(-1.0, min(1.0, (PROC_H / 2.0 - cy) / (PROC_H / 2.0))),
+                "nx": max(-1.0, min(1.0, z * (cx - hw - ox) / hw)),
+                "ny": max(-1.0, min(1.0, z * (hh + oy - cy) / hh)),
                 "yaw": yaw, "pitch": pitch,
                 "yaw_rate": yaw_rate,
                 "speed": speed_profile(depth_m, state)}

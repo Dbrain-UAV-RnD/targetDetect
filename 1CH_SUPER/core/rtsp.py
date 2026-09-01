@@ -6,7 +6,7 @@ import cv2
 from config import (RTSP_PORT, RTSP_PATH, RTSP_W, RTSP_H, RTSP_FPS,
                     RTSP_BITRATE, RTSP_PRESET, RTSP_CODEC, RTSP_GOP,
                     RTSP_VBV, RTSP_QUEUE, RTSP_INTRA_REFRESH, RTSP_X265_OPTS,
-                    PROC_W, PROC_H)
+                    OSD_BOX_STICKY_FRAC, PROC_W, PROC_H)
 
 
 class RtspServer:
@@ -108,13 +108,14 @@ class RtspRenderer:
         self._run = True
         self._push_t = []
         self._sbox = None
+        self._z = None
         threading.Thread(target=self._loop, daemon=True).start()
 
-    def submit(self, bgr, box, zoom):
+    def submit(self, bgr, box, zoom, view=None):
         with self.cv:
             if self.job is not None:
                 self.dropped += 1
-            self.job = (bgr, box, zoom)
+            self.job = (bgr, box, zoom, view)
             self.cv.notify()
 
     def stop(self):
@@ -129,15 +130,17 @@ class RtspRenderer:
                     self.cv.wait(0.5)
                 if not self._run:
                     return
-                bgr, box, zoom = self.job
+                bgr, box, zoom, view = self.job
                 self.job = None
             try:
                 uz = z = max(1.0, zoom)
-                stab_on = False
+                stab_on = self.stab is not None and self.stab.enabled
                 ox = oy = 0.0
-                if self.stab is not None:
+                if view is not None:
+                    # 캡처 프레임과 같은 시점의 뷰(줌+안정화 오프셋)
+                    z, ox, oy = view
+                elif self.stab is not None:
                     z, ox, oy = self.stab.view(z)
-                    stab_on = self.stab.enabled
                 H, W = bgr.shape[:2]
                 cw, ch = max(2, int(W / z)), max(2, int(H / z))
                 x0 = (W - cw) // 2 + int(round(ox * W / PROC_W))
@@ -147,25 +150,40 @@ class RtspRenderer:
                 out = cv2.resize(bgr[y0:y0 + ch, x0:x0 + cw],
                                  (RTSP_W, RTSP_H))
                 if box is None:
+                    vbox = None
+                else:
+                    # 안정화 보정이 끝난 표시 좌표계로 투영한 뒤 평활화한다:
+                    # 원본 좌표계에서 평활화하면 기체 흔들림(크롭이 이미
+                    # 상쇄한 성분)까지 따라가며 박스가 배경 위에서 출렁인다
+                    kx, ky = W / PROC_W, H / PROC_H
+                    vbox = ((box[0] * kx - x0) * RTSP_W / cw,
+                            (box[1] * ky - y0) * RTSP_H / ch,
+                            box[2] * kx * RTSP_W / cw,
+                            box[3] * ky * RTSP_H / ch)
+                if vbox is None:
                     self._sbox = None
                 else:
-                    if self._sbox is None or (
-                            abs(box[0] - self._sbox[0]) > box[2]
-                            or abs(box[1] - self._sbox[1]) > box[3]):
-                        self._sbox = tuple(box)
+                    if (self._sbox is None or z != self._z
+                            or abs(vbox[0] - self._sbox[0]) > vbox[2]
+                            or abs(vbox[1] - self._sbox[1]) > vbox[3]):
+                        self._sbox = vbox
                     else:
-                        a = 0.35
-                        self._sbox = tuple((1 - a) * s + a * b
-                                           for s, b in zip(self._sbox, box))
+                        # 트래커 지터 폭 이내 변화는 표시 박스를 고정(스티키)
+                        tx = max(2.0, OSD_BOX_STICKY_FRAC * vbox[2])
+                        ty = max(2.0, OSD_BOX_STICKY_FRAC * vbox[3])
+                        if (abs(vbox[0] - self._sbox[0]) > tx
+                                or abs(vbox[1] - self._sbox[1]) > ty
+                                or abs(vbox[2] - self._sbox[2]) > tx
+                                or abs(vbox[3] - self._sbox[3]) > ty):
+                            a = 0.35
+                            self._sbox = tuple((1 - a) * s + a * b
+                                               for s, b in
+                                               zip(self._sbox, vbox))
+                self._z = z
                 if self._sbox is not None:
                     x, y, w, h = self._sbox
-                    kx, ky = W / PROC_W, H / PROC_H
-                    ox = (x * kx - x0) * RTSP_W / cw
-                    oy = (y * ky - y0) * RTSP_H / ch
-                    ow = w * kx * RTSP_W / cw
-                    oh = h * ky * RTSP_H / ch
-                    cv2.rectangle(out, (int(ox), int(oy)),
-                                  (int(ox + ow), int(oy + oh)),
+                    cv2.rectangle(out, (int(x), int(y)),
+                                  (int(x + w), int(y + h)),
                                   (0, 255, 0), 3)
                 now = time.monotonic()
                 self._push_t = [t for t in self._push_t if now - t < 2.0]

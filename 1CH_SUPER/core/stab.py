@@ -57,8 +57,8 @@ class Stabilizer:
         with self.lock:
             self.tau = STAB_TAU_MIN + a * (STAB_TAU_MAX - STAB_TAU_MIN)
 
-    def _estimate(self, prev, small):
-        p0 = cv2.goodFeaturesToTrack(prev, STAB_CORNERS, 0.01, 8)
+    def _estimate(self, prev, small, mask=None):
+        p0 = cv2.goodFeaturesToTrack(prev, STAB_CORNERS, 0.01, 8, mask=mask)
         if p0 is None or len(p0) < STAB_MIN_PTS:
             return None, 0
         p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, small, p0, None, **_LK)
@@ -72,19 +72,32 @@ class Stabilizer:
         return np.array((np.median(d[:, 0]) * (PROC_W / STAB_W),
                          np.median(d[:, 1]) * (PROC_H / STAB_H))), n
 
-    def update(self, gray, t):
+    def update(self, gray, t, mask_box=None):
+        """mask_box(proc 좌표)가 오면 그 영역(트래킹 박스)을 코너 선정에서
+        제외한다 — 타깃이 커지면 타깃 자신의 이동이 전역 이동으로 오염됨.
+        반환값: 이번 프레임 전역 이동 추정(proc px) 또는 None(추정 불가)."""
         with self.lock:
             enabled, tau = self.enabled, self.tau
             dt = t - self.t if self.t > 0.0 else 1.0 / 30.0
             self.t = t
         if not enabled:
             self.prev = None
-            return
+            return None
         t0 = time.perf_counter()
         small = cv2.resize(gray, (STAB_W, STAB_H),
                            interpolation=cv2.INTER_AREA)
         prev, self.prev = self.prev, small
-        d, n = (None, 0) if prev is None else self._estimate(prev, small)
+        mask = None
+        if mask_box is not None:
+            x, y, w, h = mask_box
+            px, py = 0.1 * w, 0.1 * h
+            mask = np.full((STAB_H, STAB_W), 255, np.uint8)
+            mask[max(0, int((y - py) * STAB_H / PROC_H)):
+                 int((y + h + py) * STAB_H / PROC_H) + 1,
+                 max(0, int((x - px) * STAB_W / PROC_W)):
+                 int((x + w + px) * STAB_W / PROC_W) + 1] = 0
+        d, n = (None, 0) if prev is None else self._estimate(prev, small, mask)
+        raw_d = d
         if d is None:
             d = np.zeros(2)  # 추정 불가: 보정만 감쇠(리센터)
         dt = max(1e-3, min(0.1, dt))
@@ -96,6 +109,7 @@ class Stabilizer:
             self.c[1] = max(-cmax[1], min(cmax[1], self.c[1]))
             self.response = n
             self.ms = (time.perf_counter() - t0) * 1e3
+        return raw_d
 
     def view(self, zoom):
         """(z_eff, ox, oy) — proc 좌표계. 크롭 창 원점 = 중앙 크롭 원점 + (ox, oy)."""

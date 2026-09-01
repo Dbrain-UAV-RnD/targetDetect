@@ -6,7 +6,8 @@ import numpy as np
 from config import (TRACKER, NANOTRACK_DIR, TRACK_CONF_THRESH,
                     TRACK_APCE_MIN, TRACK_LOST_FRAMES,
                     TRACK_GRACE_S, COLOR_MAX_D, COLOR0_MAX_D,
-                    COLOR_EMA, COLOR_EMA_GATE, COLOR_GRID)
+                    COLOR_EMA, COLOR_EMA_GATE, COLOR_GRID,
+                    TERM_HOLD_FRAC, TERM_CONF_THRESH)
 
 EXEMPLAR = 127
 INSTANCE = 255
@@ -42,6 +43,9 @@ class CsrtTracker:
         self.score = 1.0 if ok else 0.0
         self.box = tuple(b) if ok else None
         return ok, self.box
+
+    def feedforward(self, dx, dy):
+        pass
 
     def stop(self):
         self._t = None
@@ -181,6 +185,12 @@ class NanoTracker:
         self.color_d = 0.0
         self.color_d0 = 0.0
 
+    def feedforward(self, dx, dy):
+        # 안정화 전역 이동(자기운동) 프라이어: 탐색 중심만 미리 옮긴다
+        if self.zf is not None:
+            self.pos[0] += dx
+            self.pos[1] += dy
+
     def update(self, img):
         if self.zf is None:
             return False, None
@@ -254,9 +264,11 @@ class NanoTracker:
                          if self.ref0 is not None else 0.0)
         color_bad = (self.color_d > COLOR_MAX_D
                      or self.color_d0 > COLOR0_MAX_D)
+        conf = (TERM_CONF_THRESH if self.frac >= TERM_HOLD_FRAC
+                else TRACK_CONF_THRESH)
         if time.monotonic() - self._start_t < TRACK_GRACE_S:
             self._miss = self._miss + 1 if color_bad else 0
-        elif (self.score < TRACK_CONF_THRESH or self.apce < TRACK_APCE_MIN
+        elif (self.score < conf or self.apce < TRACK_APCE_MIN
                 or color_bad):
             self._miss += 1
         else:

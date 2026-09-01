@@ -17,7 +17,7 @@ CAP_DEV_FPS = _env_int("CAP_DEV_FPS", CAP_FPS)
 CAM_INDEX = _env_int("CAM_INDEX", 0)
 CAM_CTRLS = os.environ.get(
     "CAM_CTRLS",
-    "backlight_compensation=0,brightness=-15,saturation=80,auto_exposure=3")
+    "backlight_compensation=0,brightness=-15,saturation=56,auto_exposure=3")
 
 PROC_W = _env_int("PROC_W", 640)
 PROC_H = _env_int("PROC_H", 360)
@@ -40,6 +40,10 @@ COLOR_EMA_GATE = _env_float("COLOR_EMA_GATE", 0.1)
 COLOR_GRID = _env_int("COLOR_GRID", 16)
 COLOR_EMA = _env_float("COLOR_EMA", 0.002)
 TRACK_LOST_FRAMES = _env_int("TRACK_LOST_FRAMES", 10)
+# 근접(박스 점유율 큼) 구간: 수동초점 블러로 score/SP가 무너져도
+# 색 게이트만으로 트랙을 유지한다
+TERM_HOLD_FRAC   = _env_float("TERM_HOLD_FRAC", 0.12)
+TERM_CONF_THRESH = _env_float("TERM_CONF_THRESH", 0.25)
 NANOTRACK_DIR = os.environ.get("NANOTRACK_DIR", "/home/gimbal/models/nanotrack")
 
 YAW_KP          = _env_float("YAW_KP", 0.8)
@@ -106,6 +110,7 @@ RTSP_GOP     = _env_int("RTSP_GOP", RTSP_FPS * 2)
 RTSP_VBV     = _env_int("RTSP_VBV", 300)
 RTSP_QUEUE   = _env_int("RTSP_QUEUE", 3)
 RTSP_INTRA_REFRESH = os.environ.get("RTSP_INTRA_REFRESH", "1") not in ("0", "false", "no")
+OSD_BOX_STICKY_FRAC = _env_float("OSD_BOX_STICKY_FRAC", 0.06)
 RTSP_X265_OPTS = os.environ.get(
     "RTSP_X265_OPTS",
     "no-rect=1:no-amp=1:wpp=1:pmode=1:pme=1:frame-threads=4:rd=1:me=0:subme=0")
@@ -137,6 +142,8 @@ MAX_ZOOM     = _env_float("MAX_ZOOM", 5.0)
 ZOOM_RATE    = _env_float("GCS_ZOOM_RATE", 2.0)
 ZOOM_TIMEOUT = _env_float("GCS_ZOOM_TIMEOUT", 3.0)
 DEADBAND_FRAC = _env_float("DEADBAND_FRAC", 0.03)
+FOLLOW_TAU     = _env_float("FOLLOW_TAU", 0.065)
+FOLLOW_TAU_OFF = _env_float("FOLLOW_TAU_OFF", 0.205)
 
 FCC_TX_HEADER1, FCC_TX_HEADER2 = 0xBB, 0x88
 FCC_RX_HEADER1, FCC_RX_HEADER2 = 0xBB, 0x99
