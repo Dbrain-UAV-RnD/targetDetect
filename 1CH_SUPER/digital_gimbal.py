@@ -1,12 +1,4 @@
-"""1CH_SUPER digital gimbal - 단일 파일 빌드.
-모듈 구조(main.py + core/comms/sensors/hailo)를 그대로 이어붙인 것.
-Hailo 서비스는 이 파일을 --hailo-service 플래그로 재실행해 띄운다.
-"""
 
-
-# ==================================================================
-# config.py
-# ==================================================================
 
 import os
 import struct
@@ -50,8 +42,8 @@ COLOR_EMA_GATE = _env_float("COLOR_EMA_GATE", 0.1)
 COLOR_GRID = _env_int("COLOR_GRID", 16)
 COLOR_EMA = _env_float("COLOR_EMA", 0.002)
 TRACK_LOST_FRAMES = _env_int("TRACK_LOST_FRAMES", 10)
-# 근접(박스 점유율 큼) 구간: 수동초점 블러로 score/SP가 무너져도
-# 색 게이트만으로 트랙을 유지한다
+
+
 TERM_HOLD_FRAC   = _env_float("TERM_HOLD_FRAC", 0.12)
 TERM_CONF_THRESH = _env_float("TERM_CONF_THRESH", 0.25)
 NANOTRACK_DIR = os.environ.get("NANOTRACK_DIR", "/home/gimbal/models/nanotrack")
@@ -174,10 +166,6 @@ TOF_I2C_ADDR = _env_int("TOF_I2C_ADDR", 0x29)
 BUMPER_GPIO  = _env_int("BUMPER_GPIO", 17)
 
 
-# ==================================================================
-# core/shm.py
-# ==================================================================
-
 import pickle
 import struct
 import numpy as np
@@ -259,13 +247,8 @@ class BlobSlot(_Slot):
         return pickle.loads(payload), t, fid, seq
 
 
-# ==================================================================
-# core/state_machine.py
-# ==================================================================
-
 import time
 from enum import Enum
-
 
 
 class State(Enum):
@@ -341,10 +324,6 @@ class StateMachine:
         return self.state
 
 
-# ==================================================================
-# core/control.py
-# ==================================================================
-
 import math
 import time
 
@@ -388,7 +367,7 @@ def control_step(state, box, depth_m, view=None):
         ey = _soft_deadband(cy - PROC_H / 2.0, DEADBAND_FRAC * PROC_H / 2.0)
         yaw, pitch = target_angles(PROC_W / 2.0 + ex, PROC_H / 2.0 + ey)
         yaw_rate = max(-YAW_RATE_MAX, min(YAW_RATE_MAX, YAW_KP * yaw))
-        # nx/ny는 지상국 OSD용: 다운링크 영상(줌+안정화 크롭) 좌표계로 투영
+
         z, ox, oy = view if view is not None else (1.0, 0.0, 0.0)
         hw, hh = PROC_W / 2.0, PROC_H / 2.0
         return {"valid": True,
@@ -467,10 +446,6 @@ class CmdFilter:
         self.last = None
         return cmd
 
-
-# ==================================================================
-# core/tracker.py
-# ==================================================================
 
 import os
 import time
@@ -655,7 +630,7 @@ class NanoTracker:
         self.color_d0 = 0.0
 
     def feedforward(self, dx, dy):
-        # 안정화 전역 이동(자기운동) 프라이어: 탐색 중심만 미리 옮긴다
+
         if self.zf is not None:
             self.pos[0] += dx
             self.pos[1] += dy
@@ -780,10 +755,6 @@ def make_tracker():
         return CsrtTracker()
 
 
-# ==================================================================
-# core/stab.py
-# ==================================================================
-
 import math
 import threading
 import time
@@ -797,14 +768,6 @@ _LK = dict(winSize=(15, 15), maxLevel=2,
 
 
 class Stabilizer:
-    """표시 전용 안정화: LK 희소 플로우 미디언으로 전역 평행이동 추정,
-    크롭 창 오프셋으로 보정.
-
-    위상상관은 이 footage(저텍스처+모션블러)에서 5%가 오추정이라 기각,
-    LK+fb체크+미디언이 상호정합 p95 0.9px. 트래커/제어/FCC는 원본 좌표
-    그대로 두고, 렌더러의 줌 크롭 원점과 GCS 클릭 역변환에만 view()를
-    반영한다.
-    """
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -856,9 +819,6 @@ class Stabilizer:
                          np.median(d[:, 1]) * (PROC_H / STAB_H))), n
 
     def update(self, gray, t, mask_box=None):
-        """mask_box(proc 좌표)가 오면 그 영역(트래킹 박스)을 코너 선정에서
-        제외한다 — 타깃이 커지면 타깃 자신의 이동이 전역 이동으로 오염됨.
-        반환값: 이번 프레임 전역 이동 추정(proc px) 또는 None(추정 불가)."""
         with self.lock:
             enabled, tau = self.enabled, self.tau
             dt = t - self.t if self.t > 0.0 else 1.0 / 30.0
@@ -882,7 +842,7 @@ class Stabilizer:
         d, n = (None, 0) if prev is None else self._estimate(prev, small, mask)
         raw_d = d
         if d is None:
-            d = np.zeros(2)  # 추정 불가: 보정만 감쇠(리센터)
+            d = np.zeros(2)
         dt = max(1e-3, min(0.1, dt))
         keep = math.exp(-dt / max(1e-3, tau))
         with self.lock:
@@ -895,7 +855,6 @@ class Stabilizer:
         return raw_d
 
     def view(self, zoom):
-        """(z_eff, ox, oy) — proc 좌표계. 크롭 창 원점 = 중앙 크롭 원점 + (ox, oy)."""
         z = max(1.0, zoom)
         with self.lock:
             if not self.enabled:
@@ -907,14 +866,9 @@ class Stabilizer:
                     max(-sy, min(sy, self.c[1])))
 
 
-# ==================================================================
-# core/ptz.py
-# ==================================================================
-
 import math
 import threading
 import time
-
 
 
 class DigitalZoom:
@@ -954,11 +908,6 @@ class DigitalZoom:
 
 
 class FollowPan:
-    """디지털 짐벌: 줌 크롭 중심이 트래킹 박스를 추종하는 팬 오프셋(proc 좌표).
-
-    박스가 없으면 느린 시정수로 중앙 복귀. 오프셋 자체는 무제한으로 쌓고,
-    프레임 경계 클램프는 뷰 합성(view_now) 쪽에서 줌 배율 기준으로 건다.
-    """
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -986,16 +935,11 @@ class FollowPan:
             return self._x, self._y
 
 
-# ==================================================================
-# core/camera.py
-# ==================================================================
-
 import subprocess
 import threading
 import time
 import cv2
 import numpy as np
-
 
 
 class CameraCSI:
@@ -1096,10 +1040,6 @@ def Camera(index=0):
         return CameraV4L2(index)
 
 
-# ==================================================================
-# core/watchdog.py
-# ==================================================================
-
 import subprocess
 import threading
 import time
@@ -1168,15 +1108,10 @@ class Watchdog:
             time.sleep(0.02)
 
 
-# ==================================================================
-# core/latency.py
-# ==================================================================
-
 import collections
 import csv
 import os
 import time
-
 
 
 class LatencyLog:
@@ -1227,15 +1162,10 @@ class LatencyLog:
         self._f.close()
 
 
-# ==================================================================
-# core/rtsp.py
-# ==================================================================
-
 import threading
 import time
 
 import cv2
-
 
 
 class RtspServer:
@@ -1366,7 +1296,7 @@ class RtspRenderer:
                 stab_on = self.stab is not None and self.stab.enabled
                 ox = oy = 0.0
                 if view is not None:
-                    # 캡처 프레임과 같은 시점의 뷰(줌+안정화 오프셋)
+
                     z, ox, oy = view
                 elif self.stab is not None:
                     z, ox, oy = self.stab.view(z)
@@ -1381,9 +1311,8 @@ class RtspRenderer:
                 if box is None:
                     vbox = None
                 else:
-                    # 안정화 보정이 끝난 표시 좌표계로 투영한 뒤 평활화한다:
-                    # 원본 좌표계에서 평활화하면 기체 흔들림(크롭이 이미
-                    # 상쇄한 성분)까지 따라가며 박스가 배경 위에서 출렁인다
+
+
                     kx, ky = W / PROC_W, H / PROC_H
                     vbox = ((box[0] * kx - x0) * RTSP_W / cw,
                             (box[1] * ky - y0) * RTSP_H / ch,
@@ -1397,7 +1326,7 @@ class RtspRenderer:
                             or abs(vbox[1] - self._sbox[1]) > vbox[3]):
                         self._sbox = vbox
                     else:
-                        # 트래커 지터 폭 이내 변화는 표시 박스를 고정(스티키)
+
                         tx = max(2.0, OSD_BOX_STICKY_FRAC * vbox[2])
                         ty = max(2.0, OSD_BOX_STICKY_FRAC * vbox[3])
                         if (abs(vbox[0] - self._sbox[0]) > tx
@@ -1432,14 +1361,9 @@ class RtspRenderer:
                 pass
 
 
-# ==================================================================
-# comms/gcs.py
-# ==================================================================
-
 import socket
 import struct
 import threading
-
 
 
 def _s8(v):
@@ -1557,16 +1481,11 @@ class GcsLink:
             self.on_track(cx, cy, box)
 
 
-# ==================================================================
-# comms/fcc.py
-# ==================================================================
-
 import os
 import struct
 import termios
 import threading
 import time
-
 
 
 def _sum8(body):
@@ -1706,13 +1625,8 @@ class FccLink:
                 buf = buf[2:]
 
 
-# ==================================================================
-# sensors/tof.py
-# ==================================================================
-
 import threading
 import time
-
 
 
 class Tof:
@@ -1758,10 +1672,6 @@ class Tof:
                 pass
 
 
-# ==================================================================
-# sensors/bumper.py
-# ==================================================================
-
 class Bumper:
     def __init__(self):
         self._btn = None
@@ -1787,10 +1697,6 @@ class Bumper:
         if self._btn:
             self._btn.close()
 
-
-# ==================================================================
-# hailo/superpoint.py
-# ==================================================================
 
 import os
 import numpy as np
@@ -1853,10 +1759,6 @@ class SuperPointHef:
         return postprocess(semi, desc)
 
 
-# ==================================================================
-# hailo/depth.py
-# ==================================================================
-
 import os
 import numpy as np
 import cv2
@@ -1898,13 +1800,8 @@ class DepthHef:
         return summarize(dmap, box)
 
 
-# ==================================================================
-# hailo/orb_fallback.py
-# ==================================================================
-
 import numpy as np
 import cv2
-
 
 
 class OrbReacquirer:
@@ -1959,10 +1856,6 @@ class OrbReacquirer:
         return (float(cx - w / 2), float(cy - h / 2), float(w), float(h)), len(good)
 
 
-# ==================================================================
-# hailo/service.py
-# ==================================================================
-
 import faulthandler
 import os
 import time
@@ -1970,7 +1863,6 @@ import numpy as np
 import cv2
 
 faulthandler.enable()
-
 
 
 class HefModel:
@@ -2203,17 +2095,12 @@ def _to_proc_gray(bgr):
     return cv2.cvtColor(cv2.resize(bgr, (PROC_W, PROC_H)), cv2.COLOR_BGR2GRAY)
 
 
-# ==================================================================
-# main.py
-# ==================================================================
-
 import os
 import signal
 import subprocess
 import sys
 import threading
 import time
-
 
 
 NO_HAILO = os.environ.get("NO_HAILO", "0") not in ("0", "", "false")
@@ -2293,8 +2180,8 @@ def fast_loop(app):
     follow = FollowPan()
 
     def view_now():
-        # 다운링크 뷰 = 안정화 오프셋 + 타깃 추종 팬, 크롭이 프레임을
-        # 벗어나지 않게 합산 후 클램프 (클릭 역변환·nx/ny·렌더러 공용)
+
+
         z, ox, oy = stab.view(zoom.value())
         fx, fy = follow.offset()
         sx = (PROC_W - PROC_W / z) / 2.0
@@ -2461,7 +2348,6 @@ def main():
     signal.signal(signal.SIGINT, _bye)
     signal.signal(signal.SIGTERM, _bye)
     fast_loop(app)
-
 
 
 if __name__ == "__main__":
