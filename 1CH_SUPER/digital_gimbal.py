@@ -70,6 +70,7 @@ ROI_MIN_PX = _env_float("ROI_MIN_PX", 16.0)
 ROI_PAD = _env_float("ROI_PAD", 0.2)
 ROI_MIN_Z = _env_float("ROI_MIN_Z", 4.0)
 ROI_MAX_FILL = _env_float("ROI_MAX_FILL", 0.6)
+ROI_MAX_OTHER = _env_float("ROI_MAX_OTHER", 0.05)
 BOX_SCALE_MIN = _env_float("BOX_SCALE_MIN", 0.5)
 BOX_SCALE_MAX = _env_float("BOX_SCALE_MAX", 2.0)
 TRACK_GRACE_S = _env_float("TRACK_GRACE_S", 0.5)
@@ -148,6 +149,9 @@ ANCHOR_MAX_KP = _env_int("ANCHOR_MAX_KP", 200)
 SP_CONF_THRESH = _env_float("SP_CONF_THRESH", 0.015)
 SP_NMS_RADIUS  = _env_int("SP_NMS_RADIUS", 4)
 REACQ_MIN_MATCHES = _env_int("REACQ_MIN_MATCHES", 12)
+SP_ZOOM_TARGET = _env_float("SP_ZOOM_TARGET", 120.0)
+SP_ZOOM_MAX    = _env_float("SP_ZOOM_MAX", 8.0)
+SP_STRONG_MIN_PX = _env_float("SP_STRONG_MIN_PX", 72.0)
 AUDIT_EVERY = _env_int("AUDIT_EVERY", 10)
 AUDIT_FAILS = _env_int("AUDIT_FAILS", 5)
 AUDIT_REFRESH = _env_int("AUDIT_REFRESH", 10)
@@ -2127,23 +2131,69 @@ class SpReacquirer:
         self.anchor_desc = None
         self.anchor_size = None
         self.anchor_pts = None
+        self.anchor_ctr = (0.0, 0.0)
+        self.strong = False
+        self.zoom = 1.0
+        self.last = None
+        self._tiles = []
+        self._tile_i = 0
+
+    @staticmethod
+    def _window(cx, cy, zoom):
+        kx, ky = CAP_W / float(PROC_W), CAP_H / float(PROC_H)
+        cw, ch = CAP_W / zoom, CAP_H / zoom
+        x0 = min(max(0.0, cx * kx - cw / 2.0), CAP_W - cw)
+        y0 = min(max(0.0, cy * ky - ch / 2.0), CAP_H - ch)
+        return int(round(x0)), int(round(y0)), int(round(cw)), int(round(ch))
+
+    def _infer(self, bgr, cx, cy, zoom):
+        x0, y0, cw, ch = self._window(cx, cy, zoom)
+        pts, desc = self.sp.infer(bgr[y0:y0 + ch, x0:x0 + cw])
+        ox = x0 * PROC_W / float(CAP_W)
+        oy = y0 * PROC_H / float(CAP_H)
+        return pts, desc, (ox, oy)
+
+    def _to_sp(self, v, axis):
+        return v * self.zoom * (SP_W / float(PROC_W) if axis == 0
+                                else SP_H / float(PROC_H))
+
+    def _to_proc(self, v, axis):
+        return v * (PROC_W / float(SP_W) if axis == 0
+                    else PROC_H / float(SP_H)) / self.zoom
+
+    def _make_tiles(self):
+        n = max(1, int(math.ceil(self.zoom * 1.5)))
+        xs = [(i + 0.5) * PROC_W / n for i in range(n)]
+        ys = [(j + 0.5) * PROC_H / n for j in range(n)]
+        self._tiles = [(x, y) for y in ys for x in xs]
+        self._tile_i = 0
 
     def set_anchor(self, bgr, box):
-        pts, desc = self.sp.infer(bgr)
+        x, y, w, h = box
+        bw1 = w * SP_W / float(PROC_W)
+        bh1 = h * SP_H / float(PROC_H)
+        zoom = SP_ZOOM_TARGET / max(1.0, max(bw1, bh1))
+        self.zoom = float(np.clip(zoom, 1.0, SP_ZOOM_MAX))
+        cx, cy = x + w / 2.0, y + h / 2.0
+        pts, desc, (ox, oy) = self._infer(bgr, cx, cy, self.zoom)
         if len(pts) == 0:
             return False
-        x, y, w, h = box
-        fx, fy = SP_W / PROC_W, SP_H / PROC_H
-        cx, cy = (x + w / 2) * fx, (y + h / 2) * fy
-        bw, bh = w * fx, h * fy
+        scx, scy = self._to_sp(cx - ox, 0), self._to_sp(cy - oy, 1)
+        bw, bh = self._to_sp(w, 0), self._to_sp(h, 1)
         for scale in (1.0, 1.5):
             hw, hh = bw * scale / 2, bh * scale / 2
-            sel = ((pts[:, 0] >= cx - hw) & (pts[:, 0] <= cx + hw) &
-                   (pts[:, 1] >= cy - hh) & (pts[:, 1] <= cy + hh))
+            sel = ((pts[:, 0] >= scx - hw) & (pts[:, 0] <= scx + hw) &
+                   (pts[:, 1] >= scy - hh) & (pts[:, 1] <= scy + hh))
             if sel.sum() >= REACQ_MIN_MATCHES:
                 self.anchor_desc = desc[sel][:ANCHOR_MAX_KP]
                 self.anchor_size = (bw, bh)
                 self.anchor_pts = pts[sel][:ANCHOR_MAX_KP]
+                self.anchor_ctr = (float(scx), float(scy))
+                self.strong = (scale == 1.0 and
+                               max(w * CAP_W / PROC_W, h * CAP_H / PROC_H)
+                               >= SP_STRONG_MIN_PX)
+                self.last = (cx, cy)
+                self._make_tiles()
                 return True
         return False
 
@@ -2153,11 +2203,24 @@ class SpReacquirer:
 
     def clear(self):
         self.anchor_desc = self.anchor_size = self.anchor_pts = None
+        self.strong = False
+        self.last = None
+        self._tiles = []
 
-    def search(self, bgr):
+    def search(self, bgr, center=None):
         if not self.ready:
             return None, 0
-        pts, desc = self.sp.infer(bgr)
+        if center is None:
+            if self.last is not None and self._tile_i == 0:
+                cx, cy = self.last
+            elif self._tiles:
+                cx, cy = self._tiles[self._tile_i % len(self._tiles)]
+            else:
+                cx, cy = PROC_W / 2.0, PROC_H / 2.0
+            self._tile_i = (self._tile_i + 1) % (len(self._tiles) + 1)
+        else:
+            cx, cy = center
+        pts, desc, (ox, oy) = self._infer(bgr, cx, cy, self.zoom)
         if len(pts) < REACQ_MIN_MATCHES:
             return None, 0
         matches = self.bf.knnMatch(self.anchor_desc, desc, k=2)
@@ -2166,22 +2229,27 @@ class SpReacquirer:
         if len(good) < REACQ_MIN_MATCHES:
             return None, len(good)
         mpts = np.array([pts[m.trainIdx] for m in good], np.float32)
-        cx, cy = np.median(mpts[:, 0]), np.median(mpts[:, 1])
+        mcx, mcy = np.median(mpts[:, 0]), np.median(mpts[:, 1])
         w, h = self.anchor_size
-        inb = ((np.abs(mpts[:, 0] - cx) <= w * 0.75) &
-               (np.abs(mpts[:, 1] - cy) <= h * 0.75))
+        inb = ((np.abs(mpts[:, 0] - mcx) <= w * 0.75) &
+               (np.abs(mpts[:, 1] - mcy) <= h * 0.75))
         if inb.sum() < REACQ_MIN_MATCHES:
             return None, int(inb.sum())
-        cx = np.median(mpts[inb, 0])
-        cy = np.median(mpts[inb, 1])
         apts = self.anchor_pts[[m.queryIdx for m in good]]
         sc = _pair_scale(apts[inb], mpts[inb])
         if sc is None:
             sc = 1.0
         sc = float(np.clip(sc, BOX_SCALE_MIN, BOX_SCALE_MAX))
+        acx, acy = self.anchor_ctr
+        mcx = acx + np.median(mpts[inb, 0] - sc * (apts[inb, 0] - acx) - acx)
+        mcy = acy + np.median(mpts[inb, 1] - sc * (apts[inb, 1] - acy) - acy)
         w, h = w * sc, h * sc
-        gx, gy = PROC_W / SP_W, PROC_H / SP_H
-        return ((cx - w / 2) * gx, (cy - h / 2) * gy, w * gx, h * gy), int(inb.sum())
+        px = ox + self._to_proc(mcx - w / 2, 0)
+        py = oy + self._to_proc(mcy - h / 2, 1)
+        pw, ph = self._to_proc(w, 0), self._to_proc(h, 1)
+        self.last = (px + pw / 2, py + ph / 2)
+        self._tile_i = 0
+        return (px, py, pw, ph), int(inb.sum())
 
 
 def _load_models():
@@ -2266,9 +2334,13 @@ def service_main():
                     if reacq.ready and audit_cnt >= AUDIT_EVERY:
                         audit_cnt = 0
                         src = img
-                        sp_box, n = reacq.search(src)
+                        tb0 = ctrl.get("track_box")
+                        ctr = (None if tb0 is None else
+                               (tb0[0] + tb0[2] / 2.0, tb0[1] + tb0[3] / 2.0))
+                        sp_box, n = reacq.search(src, ctr)
                         result_slot.write({"kind": "audit", "t_frame": t_cap,
-                                           "box": sp_box, "matches": n},
+                                           "box": sp_box, "matches": n,
+                                           "strong": reacq.strong},
                                           t_cap, fid)
                         tb = ctrl.get("track_box")
                         if sp_box is not None and tb is not None:
@@ -2325,11 +2397,14 @@ def refine_box(bgr, box):
         mask = ((z > ROI_MIN_Z) & (diff > min_abs)).astype(np.uint8) * 255
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         n, cc, stats, cent = cv2.connectedComponentsWithStats(mask)
+        on = int((mask > 0).sum())
         for i in range(1, n):
             bx, by, bw, bh, area = stats[i]
             if area < 9 or bx == 0 or by == 0 or bx + bw >= W or by + bh >= H:
                 continue
             if bw > 0.7 * W or bh > 0.7 * H or bw * bh > ROI_MAX_FILL * W * H:
+                continue
+            if (on - area) > ROI_MAX_OTHER * W * H:
                 continue
             dc = math.hypot(cent[i][0] - W / 2.0, cent[i][1] - H / 2.0)
             score = float(z[cc == i].mean()) * math.sqrt(area) \
@@ -2490,6 +2565,7 @@ def fast_loop(app):
     frame_id = 0
     box = None
     audit_fails = 0
+    snap_pending = 0
     last_result_seq = 0
     anchor_box, anchor_fid = None, -1
     rtsp_next = 0.0
@@ -2514,12 +2590,13 @@ def fast_loop(app):
                 cmdf.reset()
             if click is not None:
                 cx, cy, box = click
+                clicked = box is None
                 if box is None:
                     s = DEFAULT_BOX
                     box = (cx - s / 2, cy - s / 2, s, s)
                 box = (max(0, box[0]), max(0, box[1]),
                        min(box[2], PROC_W - 1), min(box[3], PROC_H - 1))
-                if ROI_REFINE:
+                if ROI_REFINE and clicked:
                     rbox = refine_box(bgr, box)
                     if rbox != box:
                         app.log.event(f"ROI_REFINE {tuple(round(v) for v in box)}"
@@ -2555,7 +2632,8 @@ def fast_loop(app):
                     elif res["kind"] == "anchor" and not res["ok"]:
                         app.log.event("ANCHOR_FAIL")
                     elif (res["kind"] == "audit" and app.tracker.active
-                          and app.sm.state is State.TRACK):
+                          and app.sm.state is State.TRACK
+                          and res.get("strong", True)):
                         sp_box = res["box"]
                         if (sp_box is not None
                                 and res["matches"] >= REACQ_MIN_MATCHES):
@@ -2567,11 +2645,15 @@ def fast_loop(app):
                                       - (box[1] + box[3] / 2))
                                 lim = max(box[2], box[3])
                                 if dx * dx + dy * dy > lim * lim:
-                                    app.tracker.start(proc, sp_box,
-                                                      keep_ref=True)
-                                    track_ok, box = True, tuple(sp_box)
-                                    app.log.event(f"SNAPBACK {sp_box}")
+                                    snap_pending += 1
+                                    if snap_pending >= 2:
+                                        snap_pending = 0
+                                        app.tracker.start(proc, sp_box,
+                                                          keep_ref=True)
+                                        track_ok, box = True, tuple(sp_box)
+                                        app.log.event(f"SNAPBACK {sp_box}")
                                 else:
+                                    snap_pending = 0
                                     rescale = getattr(app.tracker,
                                                       "rescale", None)
                                     if rescale is not None:
