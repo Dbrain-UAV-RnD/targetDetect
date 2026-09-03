@@ -1165,8 +1165,7 @@ class RtspServer:
         launch = (
             "appsrc name=src is-live=true format=time do-timestamp=true "
             f"block=false max-bytes=0 max-buffers={RTSP_QUEUE} leaky-type=downstream "
-            f"caps=video/x-raw,format=BGR,width={RTSP_W},height={RTSP_H},framerate={RTSP_FPS}/1 "
-            "! videoconvert ! video/x-raw,format=I420 "
+            f"caps=video/x-raw,format=I420,width={RTSP_W},height={RTSP_H},framerate={RTSP_FPS}/1 "
             f"! {enc}"
         )
 
@@ -1211,7 +1210,8 @@ class RtspServer:
             src = self.src
         if src is None:
             return
-        buf = self.Gst.Buffer.new_wrapped(bgr.tobytes())
+        i420 = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV_I420)
+        buf = self.Gst.Buffer.new_wrapped(i420.tobytes())
         buf.duration = self.duration
         if src.emit("push-buffer", buf) != self.Gst.FlowReturn.OK:
             with self.lock:
