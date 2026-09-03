@@ -71,6 +71,13 @@ ROI_PAD = _env_float("ROI_PAD", 0.2)
 ROI_MIN_Z = _env_float("ROI_MIN_Z", 4.0)
 ROI_MAX_FILL = _env_float("ROI_MAX_FILL", 0.6)
 ROI_MAX_OTHER = _env_float("ROI_MAX_OTHER", 0.05)
+TRK_KF = os.environ.get("TRK_KF", "1") not in ("0", "", "false", "no")
+TRK_KF_ACC = _env_float("TRK_KF_ACC", 40.0)
+TRK_KF_MEAS = _env_float("TRK_KF_MEAS", 0.1)
+TRK_KF_ANISO_MAX = _env_float("TRK_KF_ANISO_MAX", 80.0)
+TRK_KF_ANISO_HOLD = _env_float("TRK_KF_ANISO_HOLD", 4.0)
+TRK_KF_GATE = _env_float("TRK_KF_GATE", 6.6)
+TRK_KF_STRIKES = _env_int("TRK_KF_STRIKES", 30)
 BOX_SCALE_MIN = _env_float("BOX_SCALE_MIN", 0.5)
 BOX_SCALE_MAX = _env_float("BOX_SCALE_MAX", 2.0)
 TRACK_GRACE_S = _env_float("TRACK_GRACE_S", 0.5)
@@ -136,6 +143,7 @@ SLEW_ANG_DEG_S      = _env_float("SLEW_ANG_DEG_S", 90.0)
 SLEW_N_S            = _env_float("SLEW_N_S", 3.0)
 
 WDG_FRAME_TIMEOUT_S = _env_float("WDG_FRAME_TIMEOUT_S", 0.1)
+WDG_WARMUP_FRAMES   = _env_int("WDG_WARMUP_FRAMES", 15)
 WDG_TEMP_LOG_S      = _env_float("WDG_TEMP_LOG_S", 5.0)
 
 FAST_LOOP_CORES = {int(c) for c in os.environ.get("FAST_CORES", "0,1").split(",")}
@@ -1400,6 +1408,7 @@ class Watchdog:
         self.logger = logger
         self._last_frame = time.monotonic()
         self._armed = False
+        self._warm = 0
         self._run = True
         self.temp_c = None
         self.throttled = 0
@@ -1407,7 +1416,10 @@ class Watchdog:
 
     def feed(self):
         self._last_frame = time.monotonic()
-        self._armed = True
+        if self._warm >= WDG_WARMUP_FRAMES:
+            self._armed = True
+        else:
+            self._warm += 1
 
     def stop(self):
         self._run = False
@@ -2375,6 +2387,89 @@ NO_HAILO = os.environ.get("NO_HAILO", "0") not in ("0", "", "false")
 DEFAULT_BOX = 48
 
 
+class TrackFilter:
+
+    def __init__(self):
+        self.x = None
+        self.P = None
+        self.strikes = 0
+        self.aniso = 1.0
+        self.gated = False
+
+    def reset(self, box):
+        cx, cy = box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
+        s = max(1.0, TRK_KF_MEAS * max(box[2], box[3]))
+        self.x = np.array([cx, cy, 0.0, 0.0])
+        self.P = np.diag([s * s, s * s, 2500.0, 2500.0])
+        self.strikes = 0
+        self.aniso = 1.0
+        self.gated = False
+
+    @staticmethod
+    def _tensor(gray, box):
+        x, y, w, h = box
+        x0, y0 = int(max(0, x)), int(max(0, y))
+        x1, y1 = int(min(gray.shape[1], x + w)), int(min(gray.shape[0], y + h))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return np.eye(2), 1.0
+        g = gray[y0:y1, x0:x1].astype(np.float32)
+        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+        J = np.array([[(gx * gx).mean(), (gx * gy).mean()],
+                      [(gx * gy).mean(), (gy * gy).mean()]])
+        lam, V = np.linalg.eigh(J)
+        ratio = math.sqrt(max(lam[1], 1e-6) / max(lam[0], 1e-6))
+        return V, min(TRK_KF_ANISO_MAX, ratio)
+
+    def step(self, box, ego, dt, gray):
+        if self.x is None:
+            self.reset(box)
+            return box, True
+        dt = max(1e-3, min(0.2, dt))
+        F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]],
+                     dtype=np.float64)
+        G = np.array([[dt * dt / 2, 0], [0, dt * dt / 2], [dt, 0], [0, dt]])
+        Q = G @ G.T * (TRK_KF_ACC ** 2)
+        V, aniso = self._tensor(gray, box)
+        self.aniso = aniso
+        ew = V[:, 0]
+        hold = min(1.0, max(0.0, (aniso - 1.0) / (TRK_KF_ANISO_HOLD - 1.0)))
+        vw = self.x[2] * ew[0] + self.x[3] * ew[1]
+        self.x[2] -= ew[0] * vw * hold
+        self.x[3] -= ew[1] * vw * hold
+        self.x = F @ self.x
+        if ego is not None:
+            self.x[0] += ego[0]
+            self.x[1] += ego[1]
+        self.P = F @ self.P @ F.T + Q
+        z = np.array([box[0] + box[2] / 2.0, box[1] + box[3] / 2.0])
+        s = max(1.0, TRK_KF_MEAS * max(box[2], box[3]))
+        sw = s * (1.0 + hold * (TRK_KF_ANISO_MAX - 1.0))
+        R = V @ np.diag([sw * sw, s * s]) @ V.T
+        H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float64)
+        y = z - H @ self.x
+        S = H @ self.P @ H.T + R
+        er = V[:, 1]
+        Sr = float(er @ S @ er)
+        yr = float(er @ y)
+        d2 = yr * yr / max(Sr, 1e-6)
+        if d2 > TRK_KF_GATE:
+            self.strikes += 1
+            self.gated = True
+        else:
+            K = self.P @ H.T @ np.linalg.inv(S)
+            self.x = self.x + K @ y
+            self.P = (np.eye(4) - K @ H) @ self.P
+            vw = self.x[2] * ew[0] + self.x[3] * ew[1]
+            self.x[2] -= ew[0] * vw * hold
+            self.x[3] -= ew[1] * vw * hold
+            self.strikes = 0
+            self.gated = False
+        cx, cy = float(self.x[0]), float(self.x[1])
+        out = (cx - box[2] / 2.0, cy - box[3] / 2.0, box[2], box[3])
+        return out, self.strikes < TRK_KF_STRIKES
+
+
 def refine_box(bgr, box):
     kx, ky = bgr.shape[1] / float(PROC_W), bgr.shape[0] / float(PROC_H)
     x0, y0 = max(0, int(box[0] * kx)), max(0, int(box[1] * ky))
@@ -2561,6 +2656,7 @@ def fast_loop(app):
     fcc = FccLink(app.fcc_command, app.cmd_event).start()
 
     cmdf = CmdFilter()
+    tkf = TrackFilter()
     frame_id = 0
     box = None
     audit_fails = 0
@@ -2569,6 +2665,7 @@ def fast_loop(app):
     anchor_box, anchor_fid = None, -1
     rtsp_next = 0.0
     rtsp_period = 1.0 / RTSP_FPS
+    prev_t_cap = time.monotonic()
 
     try:
         while True:
@@ -2602,6 +2699,7 @@ def fast_loop(app):
                                       f" -> {tuple(round(v, 1) for v in rbox)}")
                         box = rbox
                 app.tracker.start(proc, box)
+                tkf.reset(box)
                 app.sm.on_target_selected()
                 cmdf.reset()
                 audit_fails = 0
@@ -2612,6 +2710,18 @@ def fast_loop(app):
                 app.tracker.feedforward(float(ego_d[0]), float(ego_d[1]))
             track_ok, box = (app.tracker.update(proc)
                              if app.tracker.active else (False, None))
+            if TRK_KF and track_ok and box is not None:
+                fbox, alive = tkf.step(box, ego_d, t_cap - prev_t_cap, gray)
+                if alive:
+                    box = fbox
+                    app.tracker.pos[0] = box[0] + box[2] / 2.0
+                    app.tracker.pos[1] = box[1] + box[3] / 2.0
+                    app.tracker.box = box
+                else:
+                    app.tracker.stop()
+                    track_ok, box = False, None
+                    app.log.event(f"KF_LOST strikes={tkf.strikes}")
+            prev_t_cap = t_cap
             t1 = time.perf_counter()
 
             res, res_t, res_fid, seq = result_slot.read()
@@ -2625,6 +2735,7 @@ def fast_loop(app):
                                          lambda i, b: True)(proc, res["box"])
                         if ok_ref:
                             app.tracker.start(proc, res["box"], keep_ref=True)
+                            tkf.reset(res["box"])
                             audit_fails = 0
                         else:
                             app.log.event(f"REACQ_REJECT color {res['box']}")
@@ -2649,6 +2760,7 @@ def fast_loop(app):
                                         snap_pending = 0
                                         app.tracker.start(proc, sp_box,
                                                           keep_ref=True)
+                                        tkf.reset(sp_box)
                                         track_ok, box = True, tuple(sp_box)
                                         app.log.event(f"SNAPBACK {sp_box}")
                                 else:
@@ -2690,7 +2802,9 @@ def fast_loop(app):
                 anchor_box, anchor_fid = None, -1
             ctrl_slot.write({"state": state.name, "track_box": box,
                              "anchor_box": anchor_box,
-                             "anchor_fid": anchor_fid}, t_cap, frame_id)
+                             "anchor_fid": anchor_fid,
+                             "kf": (tkf.strikes, round(tkf.aniso, 1),
+                                    tkf.gated)}, t_cap, frame_id)
 
             t3 = time.perf_counter()
             app.log.frame(frame_id, state.name, t0, t1, t2, t3,
