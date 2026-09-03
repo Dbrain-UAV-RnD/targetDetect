@@ -1537,7 +1537,7 @@ class GcsLink:
     def __init__(self, on_track=None, on_clear=None, on_center=None,
                  on_ai_mode=None, on_zoom_rate=None, on_zoom_abs=None,
                  on_stab_mode=None, on_stab_alpha=None, on_gain=None,
-                 zoom=None, view=None, port=GCS_UDP_PORT):
+                 on_rotate=None, zoom=None, view=None, port=GCS_UDP_PORT):
         self.on_track = on_track
         self.on_clear = on_clear
         self.on_center = on_center
@@ -1547,6 +1547,7 @@ class GcsLink:
         self.on_stab_mode = on_stab_mode
         self.on_stab_alpha = on_stab_alpha
         self.on_gain = on_gain
+        self.on_rotate = on_rotate
         self.zoom = zoom or (lambda: 1.0)
         self.view = view
         self.port = port
@@ -1615,6 +1616,10 @@ class GcsLink:
             if self.on_stab_alpha:
                 self.on_stab_alpha(msg[p])
 
+        elif cmd == CMD_GIMBAL_ROTATE:
+            if self.on_rotate:
+                self.on_rotate(_s8(msg[p]), _s8(msg[p + 1]))
+
         elif cmd == CMD_SET_GAIN:
             if self.on_gain:
                 self.on_gain([_s8(b) for b in msg[p:p + 10]])
@@ -1666,15 +1671,16 @@ def _deg_x10(v):
 
 def tx_packet(cmd):
     on = 1 if cmd.get("valid") and not cmd.get("estop") else 0
+    xm, ym = cmd.get("rotate", (0.0, 0.0))
     fields = [FCC_TX_HEADER1, FCC_TX_HEADER2,
               on, cmd.get("nx", 0.0), cmd.get("ny", 0.0), on,
-              0.0, 0.0, 0, cmd.get("center", 0),
+              xm, ym, 0, cmd.get("center", 0),
               0,
               _deg_x10(cmd.get("pitch", 0.0)) if on else 0,
               _deg_x10(cmd.get("yaw", 0.0)) if on else 0,
               _deg_x10(cmd.get("yaw_rate", 0.0)) if on else 0,
               int(round(cmd.get("speed", 0.0) * 1000)) if on else 0,
-              0] + [0] * 10
+              0] + cmd.get("gain", [0] * 10)
     raw = struct.pack(FCC_TX_FMT, *(fields + [0]))
     return raw[:-1] + bytes([_sum8(raw[:-1])])
 
@@ -2141,6 +2147,8 @@ class App:
         self.click = None
         self.clear_req = False
         self.cmd = {"valid": False, "estop": False}
+        self.rotate = (0.0, 0.0)
+        self.gain = [0] * 10
         self.sm = StateMachine()
         self.cmd_event = threading.Event()
         self.log = LatencyLog(every=int(os.environ.get("LAT_EVERY", "30")))
@@ -2162,6 +2170,16 @@ class App:
         self.sm.reset()
         self.on_clear()
 
+    def on_rotate(self, yaw, pitch):
+        with self.lock:
+            self.rotate = (float(yaw), float(pitch))
+
+    def on_gain(self, values):
+        g = [max(-128, min(127, int(v))) for v in values[:10]]
+        g += [0] * (10 - len(g))
+        with self.lock:
+            self.gain = g
+
     def on_trip(self, why):
         self.log.event(f"WATCHDOG {why}")
         self.sm.on_watchdog_trip(why)
@@ -2169,6 +2187,8 @@ class App:
     def fcc_command(self):
         with self.lock:
             c = dict(self.cmd)
+            c["rotate"] = self.rotate
+            c["gain"] = list(self.gain)
         c["estop"] = self.sm.state is State.ESTOP
         return c
 
@@ -2231,11 +2251,16 @@ def fast_loop(app):
                 return False
         return True
 
+    def on_gain(values):
+        app.on_gain(values)
+        stab.set_gain(values)
+
     gcs = GcsLink(on_track=app.on_track, on_clear=app.on_clear,
                   on_center=app.on_center, on_zoom_rate=zoom.set_rate,
                   on_zoom_abs=zoom.set_zoom, zoom=zoom.value,
                   on_stab_mode=stab.set_mode, on_stab_alpha=stab.set_alpha,
-                  on_gain=stab.set_gain, on_ai_mode=stab.set_mode,
+                  on_gain=on_gain, on_rotate=app.on_rotate,
+                  on_ai_mode=stab.set_mode,
                   view=view_now).start()
     fcc = FccLink(app.fcc_command, app.cmd_event).start()
 
