@@ -2,17 +2,6 @@
 
 !.gitignore
 
-!4CH/
-!4CH/digital-gimbal.service
-!4CH/gimbal-camera-ready.sh
-!4CH/digital_gimbal.py
-
-!1CH/
-!1CH/digital-gimbal.service
-!1CH/gimbal-camera-ready.sh
-!1CH/digital_gimbal.py
-!1CH/validate_0b.py
-
 !1CH_SUPER/
 !1CH_SUPER/**
 1CH_SUPER/logs/
