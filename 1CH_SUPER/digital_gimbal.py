@@ -821,9 +821,8 @@ def crop_matrix(W, H, z, fx, fy):
     ch = max(2.0, H / z)
     x0 = (W - cw) / 2.0 + fx * W / PROC_W
     y0 = (H - ch) / 2.0 + fy * H / PROC_H
-    if not STAB_FREE:
-        x0 = max(0.0, min(W - cw, x0))
-        y0 = max(0.0, min(H - ch, y0))
+    x0 = max(0.0, min(W - cw, x0))
+    y0 = max(0.0, min(H - ch, y0))
     return np.array([[RTSP_W / cw, 0.0, -RTSP_W / cw * x0],
                      [0.0, RTSP_H / ch, -RTSP_H / ch * y0],
                      [0.0, 0.0, 1.0]], dtype=np.float64)
