@@ -63,6 +63,13 @@ TRACK_APCE_MIN = _env_float("TRACK_APCE_MIN", 0.0)
 BOX_MAX_FRAC = _env_float("BOX_MAX_FRAC", 0.5)
 BOX_SCALE_LR = _env_float("BOX_SCALE_LR", 0.5)
 BOX_AUDIT_LR = _env_float("BOX_AUDIT_LR", 0.3)
+BOX_SHRINK_MAX = _env_float("BOX_SHRINK_MAX", 0.02)
+BOX_MIN_FRAC = _env_float("BOX_MIN_FRAC", 0.5)
+ROI_REFINE = os.environ.get("ROI_REFINE", "1") not in ("0", "", "false", "no")
+ROI_MIN_PX = _env_float("ROI_MIN_PX", 16.0)
+ROI_PAD = _env_float("ROI_PAD", 0.2)
+ROI_MIN_Z = _env_float("ROI_MIN_Z", 4.0)
+ROI_MAX_FILL = _env_float("ROI_MAX_FILL", 0.6)
 BOX_SCALE_MIN = _env_float("BOX_SCALE_MIN", 0.5)
 BOX_SCALE_MAX = _env_float("BOX_SCALE_MAX", 2.0)
 TRACK_GRACE_S = _env_float("TRACK_GRACE_S", 0.5)
@@ -631,6 +638,7 @@ class NanoTracker:
             self.ref_chroma = self._box_grid(img)
             self.ref0 = self.ref_chroma.copy()
         self.aspect = float(w) / float(h)
+        self.sz0 = (float(w), float(h))
         self.color_d = 0.0
         self.color_d0 = 0.0
 
@@ -735,7 +743,9 @@ class NanoTracker:
                              max(1e-6, self.sz[0] * self.sz[1]))
             lr_s = lr * BOX_SCALE_LR
             s_new = (1 - lr_s) + s_pred * lr_s
-            h_new = np.clip(self.sz[1] * s_new, 10, img.shape[0])
+            s_new = max(s_new, 1.0 - BOX_SHRINK_MAX)
+            h_floor = max(10.0, BOX_MIN_FRAC * self.sz0[1])
+            h_new = np.clip(self.sz[1] * s_new, h_floor, img.shape[0])
             self.sz[1] = h_new
             self.sz[0] = np.clip(h_new * self.aspect, 10, img.shape[1])
         if self._miss >= TRACK_LOST_FRAMES:
@@ -2294,6 +2304,55 @@ NO_HAILO = os.environ.get("NO_HAILO", "0") not in ("0", "", "false")
 DEFAULT_BOX = 48
 
 
+def refine_box(bgr, box):
+    kx, ky = bgr.shape[1] / float(PROC_W), bgr.shape[0] / float(PROC_H)
+    x0, y0 = max(0, int(box[0] * kx)), max(0, int(box[1] * ky))
+    x1, y1 = int((box[0] + box[2]) * kx), int((box[1] + box[3]) * ky)
+    crop = bgr[y0:y1, x0:x1]
+    if crop.size == 0 or min(crop.shape[:2]) < 12:
+        return box
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2Lab).astype(np.float32)
+    H, W = lab.shape[:2]
+    m = max(2, min(H, W) // 8)
+    ring = np.concatenate([lab[:m].reshape(-1, 3), lab[-m:].reshape(-1, 3),
+                           lab[:, :m].reshape(-1, 3), lab[:, -m:].reshape(-1, 3)])
+    med = np.median(ring, axis=0)
+    mad = np.median(np.abs(ring - med), axis=0) * 1.4826 + 1.0
+    best, best_score = None, 0.0
+    for ch, min_abs in ((0, 25.0), (1, 8.0), (2, 8.0)):
+        diff = np.abs(lab[:, :, ch] - med[ch])
+        z = diff / mad[ch]
+        mask = ((z > ROI_MIN_Z) & (diff > min_abs)).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        n, cc, stats, cent = cv2.connectedComponentsWithStats(mask)
+        for i in range(1, n):
+            bx, by, bw, bh, area = stats[i]
+            if area < 9 or bx == 0 or by == 0 or bx + bw >= W or by + bh >= H:
+                continue
+            if bw > 0.7 * W or bh > 0.7 * H or bw * bh > ROI_MAX_FILL * W * H:
+                continue
+            dc = math.hypot(cent[i][0] - W / 2.0, cent[i][1] - H / 2.0)
+            score = float(z[cc == i].mean()) * math.sqrt(area) \
+                * math.exp(-dc / (0.5 * max(W, H)))
+            if score > best_score:
+                best, best_score = (bx, by, bw, bh), score
+    if best is None:
+        return box
+    bx, by, bw, bh = best
+    px, py = bw * ROI_PAD, bh * ROI_PAD
+    nx = (x0 + bx - px) / kx
+    ny = (y0 + by - py) / ky
+    nw = (bw + 2 * px) / kx
+    nh = (bh + 2 * py) / ky
+    if nw < ROI_MIN_PX:
+        nx -= (ROI_MIN_PX - nw) / 2.0
+        nw = ROI_MIN_PX
+    if nh < ROI_MIN_PX:
+        ny -= (ROI_MIN_PX - nh) / 2.0
+        nh = ROI_MIN_PX
+    return (float(nx), float(ny), float(nw), float(nh))
+
+
 class App:
     def __init__(self):
         self.lock = threading.Lock()
@@ -2388,6 +2447,10 @@ def fast_loop(app):
     wdg = Watchdog(app.on_trip, logger=app.log)
     zoom = DigitalZoom()
     follow = FollowPan()
+    if ROI_REFINE:
+        _wf = np.full((CAP_H, CAP_W, 3), 120, np.uint8)
+        _wf[CAP_H // 2 - 8:CAP_H // 2 + 8, CAP_W // 2 - 8:CAP_W // 2 + 8] = (0, 0, 200)
+        refine_box(_wf, (PROC_W / 2 - 24, PROC_H / 2 - 24, 48, 48))
 
     def view_now():
         z = max(1.0, zoom.value())
@@ -2456,6 +2519,12 @@ def fast_loop(app):
                     box = (cx - s / 2, cy - s / 2, s, s)
                 box = (max(0, box[0]), max(0, box[1]),
                        min(box[2], PROC_W - 1), min(box[3], PROC_H - 1))
+                if ROI_REFINE:
+                    rbox = refine_box(bgr, box)
+                    if rbox != box:
+                        app.log.event(f"ROI_REFINE {tuple(round(v) for v in box)}"
+                                      f" -> {tuple(round(v, 1) for v in rbox)}")
+                        box = rbox
                 app.tracker.start(proc, box)
                 app.sm.on_target_selected()
                 cmdf.reset()
