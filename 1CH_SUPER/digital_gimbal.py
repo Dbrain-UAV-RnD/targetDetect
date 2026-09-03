@@ -2,6 +2,7 @@
 
 import os
 import struct
+import sys
 
 
 def _env_int(k, d):
@@ -25,7 +26,6 @@ PROC_W = _env_int("PROC_W", 640)
 PROC_H = _env_int("PROC_H", 360)
 
 SP_W, SP_H       = _env_int("SP_W", 640), _env_int("SP_H", 400)
-DEPTH_W, DEPTH_H = _env_int("DEPTH_W", 320), _env_int("DEPTH_H", 256)
 
 CAM_HFOV_DEG = _env_float("CAM_HFOV_DEG", 66.0)
 CAM_VFOV_DEG = _env_float("CAM_VFOV_DEG", 41.0)
@@ -51,11 +51,8 @@ NANOTRACK_DIR = os.environ.get("NANOTRACK_DIR", "/home/gimbal/models/nanotrack")
 YAW_KP          = _env_float("YAW_KP", 0.8)
 YAW_RATE_MAX    = _env_float("YAW_RATE_MAX", 45.0)
 SPEED_MAX       = _env_float("SPEED_MAX", 1.0)
-SLOW_DEPTH_M    = _env_float("SLOW_DEPTH_M", 3.0)
-TERMINAL_DEPTH_M = _env_float("TERMINAL_DEPTH_M", 1.0)
 TOF_TERMINAL_M  = _env_float("TOF_TERMINAL_M", 1.0)
 TOF_CONTACT_M   = _env_float("TOF_CONTACT_M", 0.10)
-DEPTH_TOF_DIVERGE_M = _env_float("DEPTH_TOF_DIVERGE_M", 1.5)
 REACQ_TIMEOUT_S = _env_float("REACQ_TIMEOUT_S", 10.0)
 
 HAILO_RESULT_MAX_AGE_S = _env_float("HAILO_RESULT_MAX_AGE_S", 0.5)
@@ -95,7 +92,6 @@ AUDIT_FAILS = _env_int("AUDIT_FAILS", 5)
 AUDIT_REFRESH = _env_int("AUDIT_REFRESH", 10)
 
 HEF_SUPERPOINT = os.environ.get("HEF_SUPERPOINT", "/home/gimbal/models/superpoint.hef")
-HEF_DEPTH      = os.environ.get("HEF_DEPTH", "/home/gimbal/models/scdepthv3.hef")
 
 LOG_DIR = os.environ.get("LOG_DIR", "/home/gimbal/1CH_SUPER/logs")
 
@@ -171,6 +167,22 @@ import struct
 import numpy as np
 from multiprocessing import shared_memory
 
+
+if sys.version_info >= (3, 13):
+    def _shm_attach(name):
+        return shared_memory.SharedMemory(name=name, track=False)
+else:
+    from multiprocessing import resource_tracker as _resource_tracker
+
+    def _shm_attach(name):
+        _real = _resource_tracker.register
+        _resource_tracker.register = lambda *a, **k: None
+        try:
+            return shared_memory.SharedMemory(name=name)
+        finally:
+            _resource_tracker.register = _real
+
+
 _HDR = struct.Struct("<IdQI")
 
 
@@ -188,7 +200,7 @@ class _Slot:
                                                   size=_HDR.size + size)
             self.shm.buf[:_HDR.size] = _HDR.pack(0, 0.0, 0, 0)
         else:
-            self.shm = shared_memory.SharedMemory(name=name, track=False)
+            self.shm = _shm_attach(name)
         self._owner = create
 
     def _write(self, payload, t, frame_id):
@@ -290,7 +302,7 @@ class StateMachine:
     def reset(self):
         self._to(State.IDLE, "reset")
 
-    def step(self, track_ok, tof_m, depth_m, bumper):
+    def step(self, track_ok, tof_m, bumper):
         s = self.state
         if s in (State.IDLE, State.ESTOP, State.CONTACT):
             return s
@@ -299,17 +311,11 @@ class StateMachine:
             self._to(State.CONTACT, f"bumper={bumper} tof={tof_m}")
             return self.state
 
-        if (s is State.TERMINAL and tof_m is not None and depth_m is not None
-                and abs(tof_m - depth_m) > DEPTH_TOF_DIVERGE_M):
-            self._to(State.ESTOP, f"depth/tof diverge {depth_m:.2f}/{tof_m:.2f}")
-            return self.state
-
         if s is State.TRACK:
             if not track_ok:
                 self._to(State.REACQUIRE, "tracker lost")
-            elif ((tof_m is not None and tof_m <= TOF_TERMINAL_M) or
-                  (depth_m is not None and depth_m <= TERMINAL_DEPTH_M)):
-                self._to(State.TERMINAL, f"tof={tof_m} depth={depth_m}")
+            elif tof_m is not None and tof_m <= TOF_TERMINAL_M:
+                self._to(State.TERMINAL, f"tof={tof_m}")
 
         elif s is State.REACQUIRE:
             if track_ok:
@@ -346,20 +352,13 @@ def _soft_deadband(e, band):
     return 0.0
 
 
-def speed_profile(depth_m, state):
+def speed_profile(state):
     if state in (State.IDLE, State.REACQUIRE, State.CONTACT, State.ESTOP):
         return 0.0
-    if depth_m is None:
-        return 0.3 * SPEED_MAX
-    if depth_m <= TERMINAL_DEPTH_M:
-        return 0.15 * SPEED_MAX
-    if depth_m >= SLOW_DEPTH_M:
-        return SPEED_MAX
-    f = (depth_m - TERMINAL_DEPTH_M) / (SLOW_DEPTH_M - TERMINAL_DEPTH_M)
-    return (0.15 + 0.85 * f) * SPEED_MAX
+    return SPEED_MAX
 
 
-def control_step(state, box, depth_m, view=None):
+def control_step(state, box, view=None):
     if state in (State.TRACK, State.TERMINAL) and box is not None:
         x, y, w, h = box
         cx, cy = x + w / 2.0, y + h / 2.0
@@ -375,7 +374,7 @@ def control_step(state, box, depth_m, view=None):
                 "ny": max(-1.0, min(1.0, z * (hh + oy - cy) / hh)),
                 "yaw": yaw, "pitch": pitch,
                 "yaw_rate": yaw_rate,
-                "speed": speed_profile(depth_m, state)}
+                "speed": speed_profile(state)}
     return {"valid": False, "nx": 0.0, "ny": 0.0,
             "yaw": 0.0, "pitch": 0.0, "yaw_rate": 0.0, "speed": 0.0}
 
@@ -1764,42 +1763,6 @@ import numpy as np
 import cv2
 
 
-DEPTH_SCALE = float(os.environ.get("DEPTH_SCALE", "1.0"))
-DEPTH_SHIFT = float(os.environ.get("DEPTH_SHIFT", "0.0"))
-
-
-def summarize(dmap, box=None):
-    h, w = dmap.shape[:2]
-    cy0, cy1 = int(h * 0.4), int(h * 0.6)
-    cx0, cx1 = int(w * 0.4), int(w * 0.6)
-    center = float(np.median(dmap[cy0:cy1, cx0:cx1]))
-    target = None
-    if box is not None:
-        x, y, bw, bh = box
-        x0 = max(0, int(x / PROC_W * w))
-        y0 = max(0, int(y / PROC_H * h))
-        x1 = min(w, int((x + bw) / PROC_W * w))
-        y1 = min(h, int((y + bh) / PROC_H * h))
-        if x1 > x0 and y1 > y0:
-            target = float(np.median(dmap[y0:y1, x0:x1]))
-    to_m = lambda v: None if v is None else v * DEPTH_SCALE + DEPTH_SHIFT
-    return to_m(target), to_m(center)
-
-
-class DepthHef:
-    def __init__(self, model):
-        self.model = model
-
-    @staticmethod
-    def preprocess(bgr):
-        return cv2.resize(bgr, (DEPTH_W, DEPTH_H))[None]
-
-    def infer(self, bgr, box=None):
-        outs = self.model.run(self.preprocess(bgr))
-        dmap = np.squeeze(next(iter(outs.values())))
-        return summarize(dmap, box)
-
-
 import numpy as np
 import cv2
 
@@ -1955,7 +1918,7 @@ class SpReacquirer:
 
 
 def _load_models():
-    sp_model, depth_model, vdev = None, None, None
+    sp_model, vdev = None, None
     try:
         from hailo_platform import VDevice, HailoSchedulingAlgorithm
         params = VDevice.create_params()
@@ -1963,11 +1926,9 @@ def _load_models():
         vdev = VDevice(params)
         if os.path.exists(HEF_SUPERPOINT):
             sp_model = SuperPointHef(HefModel(vdev, HEF_SUPERPOINT))
-        if os.path.exists(HEF_DEPTH):
-            depth_model = DepthHef(HefModel(vdev, HEF_DEPTH))
     except Exception as e:
         pass
-    return sp_model, depth_model, vdev
+    return sp_model, vdev
 
 
 _running = True
@@ -1991,7 +1952,7 @@ def service_main():
     result_slot = BlobSlot(SHM_RESULT)
     ctrl_slot = BlobSlot(SHM_CTRL)
 
-    sp_model, depth_model, vdev = _load_models()
+    sp_model, vdev = _load_models()
     reacq = SpReacquirer(sp_model) if sp_model else OrbReacquirer()
 
     last_fid = 0
@@ -2041,16 +2002,6 @@ def service_main():
                                        "backend": reacq.name}, t_cap, fid)
                 elif state in ("TRACK", "TERMINAL"):
                     busy = False
-                    if depth_model is not None:
-                        t0 = time.perf_counter()
-                        target_m, center_m = depth_model.infer(
-                            img, ctrl.get("track_box"))
-                        result_slot.write({"kind": "depth", "t_frame": t_cap,
-                                           "target_m": target_m,
-                                           "center_m": center_m,
-                                           "ms": (time.perf_counter() - t0) * 1e3},
-                                          t_cap, fid)
-                        busy = True
                     audit_cnt += 1
                     if reacq.ready and audit_cnt >= AUDIT_EVERY:
                         audit_cnt = 0
@@ -2081,9 +2032,8 @@ def service_main():
             except Exception as e:
                 time.sleep(0.1)
     finally:
-        for m in (sp_model, depth_model):
-            if m is not None:
-                m.model.close()
+        if sp_model is not None:
+            sp_model.model.close()
         if vdev is not None:
             vdev.release()
         frame_slot.close()
@@ -2115,8 +2065,6 @@ class App:
         self.cmd = {"valid": False, "estop": False}
         self.sm = StateMachine()
         self.tracker = make_tracker()
-        self.depth_m = None
-        self.depth_t = 0.0
         self.log = LatencyLog(every=int(os.environ.get("LAT_EVERY", "30")))
 
     def on_track(self, cx, cy, box):
@@ -2247,11 +2195,8 @@ def fast_loop(app):
                 last_result_seq = seq
                 age = time.monotonic() - res.get("t_frame", 0)
                 if age <= HAILO_RESULT_MAX_AGE_S:
-                    if res["kind"] == "depth":
-                        app.depth_m = res["target_m"] or res["center_m"]
-                        app.depth_t = time.monotonic()
-                    elif (res["kind"] == "reacq" and res["box"] is not None
-                          and app.sm.state is State.REACQUIRE):
+                    if (res["kind"] == "reacq" and res["box"] is not None
+                            and app.sm.state is State.REACQUIRE):
                         ok_ref = getattr(app.tracker, "matches_ref",
                                          lambda i, b: True)(proc, res["box"])
                         if ok_ref:
@@ -2287,14 +2232,9 @@ def fast_loop(app):
                                 app.tracker.stop()
                                 track_ok, box = False, None
                                 app.log.event("AUDIT_LOST")
-            if time.monotonic() - app.depth_t > 2.0:
-                app.depth_m = None
-
-            state = app.sm.step(track_ok, tof.latest_m, app.depth_m,
-                                bumper.pressed)
+            state = app.sm.step(track_ok, tof.latest_m, bumper.pressed)
             follow.update(box)
-            cmd = cmdf.step(state, control_step(state, box, app.depth_m,
-                                                view_now()), box)
+            cmd = cmdf.step(state, control_step(state, box, view_now()), box)
             with app.lock:
                 app.cmd = cmd
             t2 = time.perf_counter()
@@ -2314,7 +2254,7 @@ def fast_loop(app):
                                 f"c0={getattr(app.tracker, 'color_d0', 0.0):.3f} "
                                 f"f={getattr(app.tracker, 'frac', 0.0):.2f} "
                                 f"sb={stab.ms:.1f}ms sr={stab.response} "
-                                f"depth={app.depth_m} tof={tof.latest_m}")
+                                f"tof={tof.latest_m}")
             if rtsp is not None and rtsp.active:
                 now = time.monotonic()
                 if now >= rtsp_next:
