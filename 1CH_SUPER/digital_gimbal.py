@@ -31,7 +31,7 @@ def _env_path(k, *parts):
     return os.environ.get(k, os.path.join(*parts))
 
 
-BASE_DIR   = os.environ.get("GIMBAL_HOME", "/home/dbai")
+BASE_DIR   = os.environ.get("GIMBAL_HOME", os.path.expanduser("~"))
 APP_DIR    = _env_path("APP_DIR", BASE_DIR, "1CH_SUPER")
 MODELS_DIR = _env_path("MODELS_DIR", BASE_DIR, "models")
 
@@ -1171,22 +1171,41 @@ class CameraCSI:
 
 class CameraV4L2:
     def __init__(self, index=0):
-        self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAP_W)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAP_H)
-        self.cap.set(cv2.CAP_PROP_FPS, CAP_DEV_FPS)
-        if not self.cap.isOpened():
+        self.dev, self.cap = None, None
+        nums = sorted(int(d[5:]) for d in os.listdir("/dev")
+                      if d.startswith("video") and d[5:].isdigit()
+                      and int(d[5:]) < 16)
+        for n in [index] + [n for n in nums if n != index]:
+            cap = self._try_open(f"/dev/video{n}")
+            if cap is not None:
+                self.dev, self.cap = f"/dev/video{n}", cap
+                break
+        if self.cap is None:
             raise RuntimeError("V4L2 open failed")
         self._skip = max(1, round(CAP_DEV_FPS / CAP_FPS))
         for c in [c.strip() for c in CAM_CTRLS.split(",") if c.strip()]:
-            subprocess.run(["v4l2-ctl", "-d", f"/dev/video{index}", "-c", c],
+            subprocess.run(["v4l2-ctl", "-d", self.dev, "-c", c],
                            capture_output=True)
         self._cond = threading.Condition()
         self._frame, self._t, self._seq = None, 0.0, 0
         self._run = True
         self._thread = threading.Thread(target=self._reader, daemon=True)
         self._thread.start()
+
+    @staticmethod
+    def _try_open(path):
+        cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            cap.release()
+            return None
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAP_W)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAP_H)
+        cap.set(cv2.CAP_PROP_FPS, CAP_DEV_FPS)
+        if not cap.grab():
+            cap.release()
+            return None
+        return cap
 
     def _reader(self):
         i = 0
@@ -1576,7 +1595,7 @@ class GcsLink:
             try:
                 self._handle(data)
             except Exception as e:
-                pass
+                print(f"GCS cmd error: {e!r}", file=sys.stderr)
         sock.close()
 
     def _handle(self, msg):
@@ -1636,18 +1655,21 @@ class GcsLink:
                 self.on_clear()
             return
         sx, sy, ex, ey = struct.unpack_from("<HHHH", msg, p + 1)
-        fx, fy = PROC_W / GCS_REF_W, PROC_H / GCS_REF_H
+        fx, fy = RTSP_W / GCS_REF_W, RTSP_H / GCS_REF_H
         x1, x2 = sorted((sx * fx, ex * fx))
         y1, y2 = sorted((sy * fy, ey * fy))
         if self.view is not None:
-            z, ox, oy = self.view()
+            z, ox, oy, warp = self.view()
         else:
-            z, ox, oy = max(1.0, self.zoom()), 0.0, 0.0
-        hw, hh = PROC_W / 2.0, PROC_H / 2.0
-        x1 = hw + (x1 - hw) / z + ox
-        x2 = hw + (x2 - hw) / z + ox
-        y1 = hh + (y1 - hh) / z + oy
-        y2 = hh + (y2 - hh) / z + oy
+            z, ox, oy, warp = max(1.0, self.zoom()), 0.0, 0.0, None
+        cw3 = crop_matrix(CAP_W, CAP_H, z, ox, oy)
+        M = (cw3 if warp is None
+             else cw3 @ np.vstack([warp, (0.0, 0.0, 1.0)]))
+        inv = cv2.invertAffineTransform(M[:2].copy())
+        x1, y1 = apply_pt(inv, x1, y1)
+        x2, y2 = apply_pt(inv, x2, y2)
+        x1, x2 = sorted((x1 * PROC_W / CAP_W, x2 * PROC_W / CAP_W))
+        y1, y2 = sorted((y1 * PROC_H / CAP_H, y2 * PROC_H / CAP_H))
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         box = None if (x2 - x1 < 2 or y2 - y1 < 2) else (x1, y1, x2 - x1, y2 - y1)
         if self.on_track:

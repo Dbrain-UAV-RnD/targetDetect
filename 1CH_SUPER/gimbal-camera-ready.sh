@@ -2,13 +2,29 @@
 
 set -u
 
-DEV="/dev/video${CAM_INDEX:-0}"
+DRIVER=imx708
 
-for i in $(seq 1 30); do
-    if [ -e "${DEV}" ] \
-       && v4l2-ctl -d "${DEV}" --all 2>/dev/null | grep -q "Video Capture"; then
+for dev in /sys/bus/i2c/devices/*-00*; do
+    [ -e "${dev}/name" ] || continue
+    case "$(cat "${dev}/name" 2>/dev/null)" in
+        imx708*) ;;
+        *) continue ;;
+    esac
+    [ -e "${dev}/driver" ] && continue
+    node="${dev##*/}"
+    echo "${node}" > "/sys/bus/i2c/drivers/${DRIVER}/bind" 2>/dev/null || true
+    sleep 2
+done
+
+for i in $(seq 1 10); do
+    if timeout 8 rpicam-hello --list-cameras 2>/dev/null | grep -q "${DRIVER}"; then
         exit 0
     fi
+    for d in /dev/video*; do
+        if v4l2-ctl -d "${d}" --all 2>/dev/null | grep -q "Video Capture"; then
+            exit 0
+        fi
+    done
     sleep 2
 done
 

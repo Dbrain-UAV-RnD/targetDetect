@@ -34,7 +34,7 @@ WorkingDirectory=/home/dbai/digital-gimbal/1CH_SUPER
 
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
-ExecStartPre=/home/dbai/digital-gimbal/1CH_SUPER/gimbal-camera-ready.sh
+ExecStartPre=+/home/dbai/digital-gimbal/1CH_SUPER/gimbal-camera-ready.sh
 
 ExecStart=/home/dbai/.venv-gimbal/bin/python -u /home/dbai/digital-gimbal/1CH_SUPER/digital_gimbal.py
 
