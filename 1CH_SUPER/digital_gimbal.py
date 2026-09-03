@@ -91,24 +91,29 @@ STAB_W       = _env_int("STAB_W", 240)
 STAB_H       = _env_int("STAB_H", 135)
 STAB_ZOOM    = _env_float("STAB_ZOOM", 1.15)
 STAB_FREE    = os.environ.get("STAB_FREE", "1") not in ("0", "", "false", "no")
-STAB_FREE_PX = _env_float("STAB_FREE_PX", 200.0)
+STAB_FREE_PX = _env_float("STAB_FREE_PX", 400.0)
 STAB_TAU     = _env_float("STAB_TAU", 0.60)
 STAB_TAU_MIN = _env_float("STAB_TAU_MIN", 0.10)
 STAB_TAU_MAX = _env_float("STAB_TAU_MAX", 2.00)
-STAB_CORNERS = _env_int("STAB_CORNERS", 60)
+STAB_CORNERS = _env_int("STAB_CORNERS", 150)
 STAB_QUALITY = _env_float("STAB_QUALITY", 0.01)
 STAB_MIN_DIST = _env_int("STAB_MIN_DIST", 8)
 STAB_MIN_PTS = _env_int("STAB_MIN_PTS", 12)
 STAB_FB_ERR  = _env_float("STAB_FB_ERR", 1.0)
 STAB_HIST    = _env_int("STAB_HIST", 96)
-STAB_DEAD    = _env_float("STAB_DEAD", 1.0)
-STAB_DEAD_DEG = _env_float("STAB_DEAD_DEG", 0.03)
+STAB_DEAD    = _env_float("STAB_DEAD", 0.0)
+STAB_DEAD_DEG = _env_float("STAB_DEAD_DEG", 0.0)
 STAB_WALL    = _env_float("STAB_WALL", 2.0)
 STAB_STEP_MAX = _env_float("STAB_STEP_MAX", 0.0)
 STAB_DC_TAU  = _env_float("STAB_DC_TAU", 0.0)
 STAB_RS_MS   = _env_float("STAB_RS_MS", 0.0)
 STAB_RS_TAU  = _env_float("STAB_RS_TAU", 0.08)
-STAB_CLAHE   = _env_float("STAB_CLAHE", 6.0)
+STAB_LP_TAU  = _env_float("STAB_LP_TAU", 0.3)
+STAB_MODEL   = os.environ.get("STAB_MODEL", "rs")
+STAB_RS_LEAK_TAU = _env_float("STAB_RS_LEAK_TAU", 0.3)
+STAB_QUAD    = os.environ.get("STAB_QUAD", "1") not in ("0", "", "false", "no")
+RTSP_BANDS   = _env_int("RTSP_BANDS", 8)
+STAB_CLAHE   = _env_float("STAB_CLAHE", 0.0)
 STAB_KX      = CAP_W / float(STAB_W)
 STAB_KY      = CAP_H / float(STAB_H)
 STAB_LK = dict(winSize=(15, 15), maxLevel=2,
@@ -185,8 +190,10 @@ MAX_ZOOM     = _env_float("MAX_ZOOM", 5.0)
 ZOOM_RATE    = _env_float("GCS_ZOOM_RATE", 2.0)
 ZOOM_TIMEOUT = _env_float("GCS_ZOOM_TIMEOUT", 3.0)
 DEADBAND_FRAC = _env_float("DEADBAND_FRAC", 0.03)
-FOLLOW_TAU     = _env_float("FOLLOW_TAU", 0.065)
+FOLLOW_TAU     = _env_float("FOLLOW_TAU", 0.15)
 FOLLOW_TAU_OFF = _env_float("FOLLOW_TAU_OFF", 0.205)
+FOLLOW_DEAD_FRAC = _env_float("FOLLOW_DEAD_FRAC", 0.35)
+FOLLOW_DEAD_MIN  = _env_float("FOLLOW_DEAD_MIN", 4.0)
 
 FCC_TX_HEADER1, FCC_TX_HEADER2 = 0xBB, 0x88
 FCC_RX_HEADER1, FCC_RX_HEADER2 = 0xBB, 0x99
@@ -392,7 +399,7 @@ def view_norm(view, cx, cy):
     if view is None:
         return (max(-1.0, min(1.0, (cx - PROC_W / 2.0) / (PROC_W / 2.0))),
                 max(-1.0, min(1.0, (PROC_H / 2.0 - cy) / (PROC_H / 2.0))))
-    z, fx, fy, warp = view
+    z, fx, fy, warp = view[:4]
     cw3 = crop_matrix(CAP_W, CAP_H, z, fx, fy)
     M = (cw3[:2] if warp is None
          else (cw3 @ np.vstack([warp, (0.0, 0.0, 1.0)]))[:2])
@@ -815,6 +822,11 @@ def _gain_map(v, lo, mid, hi):
     return mid + (mid - lo) * v / 100.0
 
 
+def _gain_up(v, base, ratio):
+    g = max(0.0, min(100.0, float(v))) / 100.0
+    return base * (ratio ** g)
+
+
 class Stabilizer:
 
     def __init__(self):
@@ -826,6 +838,8 @@ class Stabilizer:
         self.corners = STAB_CORNERS
         self.min_pts = STAB_MIN_PTS
         self.free_px = STAB_FREE_PX
+        self.lp_tau = STAB_LP_TAU
+        self.rs_leak_tau = STAB_RS_LEAK_TAU
         self.ms = 0.0
         self.hist = collections.deque(maxlen=STAB_HIST)
         self.reset()
@@ -846,6 +860,11 @@ class Stabilizer:
             self.vy = 0.0
             self.dcx = 0.0
             self.dcy = 0.0
+            self.wsx = 0.0
+            self.wsy = 0.0
+            self.qx = 0.0
+            self.qy = 0.0
+            self.quad = None
 
     def request_reset(self):
         self._reset_req = True
@@ -868,9 +887,9 @@ class Stabilizer:
         if len(v) < 10:
             return
         with self.lock:
-            self.free_px = _gain_map(v[7], 20.0, STAB_FREE_PX, 600.0)
-            self.min_pts = int(round(_gain_map(v[8], 4, STAB_MIN_PTS, 40)))
-            self.corners = int(round(_gain_map(v[9], 10, STAB_CORNERS, 180)))
+            self.free_px = _gain_up(v[7], STAB_FREE_PX, 3.0)
+            self.lp_tau = _gain_up(v[8], STAB_LP_TAU, 5.0)
+            self.rs_leak_tau = _gain_up(v[9], STAB_RS_LEAK_TAU, 5.0)
 
     def budget(self):
         with self.lock:
@@ -893,12 +912,46 @@ class Stabilizer:
     @staticmethod
     def _scale(W, s):
         B = np.eye(3)
-        B[0, 0] = B[1, 1] = 1.0 + s * (W[0, 0] - 1.0)
+        B[0, 0] = 1.0 + s * (W[0, 0] - 1.0)
+        B[1, 1] = 1.0 + s * (W[1, 1] - 1.0)
         B[1, 0] = s * W[1, 0]
-        B[0, 1] = -B[1, 0]
+        B[0, 1] = s * W[0, 1]
         B[0, 2] = s * W[0, 2]
         B[1, 2] = s * W[1, 2]
         return B
+
+    @staticmethod
+    def _fit_rs(a, b):
+        P = a.reshape(-1, 2)
+        D = (b - a).reshape(-1, 2)
+        x = P[:, 0] - STAB_W / 2.0
+        y = P[:, 1] - STAB_H / 2.0
+        hh = (STAB_H / 2.0) ** 2
+        if STAB_QUAD:
+            A = np.column_stack((np.ones_like(x), y, x, y * y / hh))
+        else:
+            A = np.column_stack((np.ones_like(x), y, x))
+
+        def rfit(v):
+            w = np.ones(len(v))
+            for _ in range(3):
+                sol = np.linalg.lstsq(A * w[:, None], v * w, rcond=None)[0]
+                r = v - A @ sol
+                sc = 1.4826 * np.median(np.abs(r)) + 1e-3
+                w = (np.abs(r) < 2.5 * sc).astype(np.float64)
+            return sol
+
+        sx = rfit(D[:, 0])
+        sy = rfit(D[:, 1])
+        m = np.eye(3)[:2].copy()
+        m[0, 0] = 1.0 + sx[2]
+        m[0, 1] = sx[1]
+        m[1, 0] = sy[2]
+        m[1, 1] = 1.0 + sy[1]
+        m[0, 2] = sx[0] - sx[1] * STAB_H / 2.0 - sx[2] * STAB_W / 2.0
+        m[1, 2] = sy[0] - sy[1] * STAB_H / 2.0 - sy[2] * STAB_W / 2.0
+        q = (float(sx[3]) / hh, float(sy[3]) / hh) if STAB_QUAD else (0.0, 0.0)
+        return m, (float(sx[0]), float(sy[0])), q
 
     @staticmethod
     def _to_capture(W):
@@ -930,6 +983,8 @@ class Stabilizer:
             f = max(0.0, d - STAB_DEAD) / d
             W[0, 2] *= f
             W[1, 2] *= f
+        if STAB_MODEL == "rs":
+            return W
         sc = math.hypot(W[0, 0], W[1, 0])
         ang = math.atan2(W[1, 0], W[0, 0])
         if abs(ang) > 1e-12:
@@ -942,6 +997,7 @@ class Stabilizer:
     def update(self, proc, fit, budget, mask_box=None):
         if not self.enabled or proc is None:
             self.warp = None
+            self.quad = None
             self.step_d = None
             return None
         if self._reset_req:
@@ -971,6 +1027,7 @@ class Stabilizer:
         with self.lock:
             corners, min_pts = self.corners, self.min_pts
         m = None
+        q_step = (0.0, 0.0)
         p0 = cv2.goodFeaturesToTrack(self.prev, maxCorners=corners,
                                      qualityLevel=STAB_QUALITY,
                                      minDistance=STAB_MIN_DIST, blockSize=7,
@@ -979,8 +1036,14 @@ class Stabilizer:
             a, b = self._track(self.prev, g, p0)
             self.response = len(a)
             if len(a) >= min_pts:
-                m, _ = cv2.estimateAffinePartial2D(
-                    a, b, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+                if STAB_MODEL == "rs":
+                    m, ctr_d, q_step = self._fit_rs(a, b)
+                elif STAB_MODEL == "trans":
+                    d = np.median((b - a).reshape(-1, 2), axis=0)
+                    m = np.array([[1.0, 0.0, d[0]], [0.0, 1.0, d[1]]])
+                else:
+                    m, _ = cv2.estimateAffinePartial2D(
+                        a, b, method=cv2.RANSAC, ransacReprojThreshold=3.0)
         else:
             self.response = 0
         self.prev = g
@@ -992,8 +1055,12 @@ class Stabilizer:
         else:
             self.fail = 0
             step = np.vstack([m, (0.0, 0.0, 1.0)])
-            self.step_d = (step[0, 2] * PROC_W / STAB_W,
-                           step[1, 2] * PROC_H / STAB_H)
+            if STAB_MODEL == "rs":
+                self.step_d = (ctr_d[0] * PROC_W / STAB_W,
+                               ctr_d[1] * PROC_H / STAB_H)
+            else:
+                self.step_d = (step[0, 2] * PROC_W / STAB_W,
+                               step[1, 2] * PROC_H / STAB_H)
 
         if dt > 0.0:
             av = 1.0 - math.exp(-dt / STAB_RS_TAU)
@@ -1016,24 +1083,46 @@ class Stabilizer:
                 step[0, 2] *= f
                 step[1, 2] *= f
 
-        det = step[0, 0] ** 2 + step[1, 0] ** 2
+        det = step[0, 0] * step[1, 1] - step[0, 1] * step[1, 0]
         step_inv = np.eye(3)
-        if det >= 1e-9:
-            step_inv[0, 0] = step_inv[1, 1] = step[0, 0] / det
-            step_inv[0, 1] = step[1, 0] / det
-            step_inv[1, 0] = -step_inv[0, 1]
+        if abs(det) >= 1e-9:
+            step_inv[0, 0] = step[1, 1] / det
+            step_inv[1, 1] = step[0, 0] / det
+            step_inv[0, 1] = -step[0, 1] / det
+            step_inv[1, 0] = -step[1, 0] / det
             step_inv[0, 2] = -(step_inv[0, 0] * step[0, 2]
                                + step_inv[0, 1] * step[1, 2])
             step_inv[1, 2] = -(step_inv[1, 0] * step[0, 2]
                                + step_inv[1, 1] * step[1, 2])
         W = self.W @ step_inv
 
-        u = min(1.0, max(abs(W[0, 2]) * STAB_KX / budget[0],
-                         abs(W[1, 2]) * STAB_KY / budget[1]))
+        if dt > 0.0:
+            with self.lock:
+                lp_tau, rs_leak_tau = self.lp_tau, self.rs_leak_tau
+            a_lp = 1.0 - math.exp(-dt / lp_tau)
+            self.wsx += a_lp * (W[0, 2] * STAB_KX - self.wsx)
+            self.wsy += a_lp * (W[1, 2] * STAB_KY - self.wsy)
+        u = min(1.0, max(abs(self.wsx) / budget[0],
+                         abs(self.wsy) / budget[1]))
         with self.lock:
             tau = self.tau / (1.0 + STAB_WALL * u * u)
         alpha = 1.0 - math.exp(-dt / tau) if dt > 0.0 else 0.0
-        W = self._scale(W, 1.0 - alpha)
+        tx = W[0, 2] - alpha * self.wsx / STAB_KX
+        ty = W[1, 2] - alpha * self.wsy / STAB_KY
+        self.wsx -= alpha * self.wsx
+        self.wsy -= alpha * self.wsy
+        W[0, 2], W[1, 2] = tx, ty
+        if dt <= 0.0:
+            with self.lock:
+                rs_leak_tau = self.rs_leak_tau
+        a_rs = 1.0 - math.exp(-dt / rs_leak_tau) if dt > 0.0 else 0.0
+        self.qx = (self.qx - q_step[0]) * (1.0 - a_rs)
+        self.qy = (self.qy - q_step[1]) * (1.0 - a_rs)
+        if a_rs > 0.0:
+            ctr = np.array([STAB_W / 2.0, STAB_H / 2.0])
+            t_c = W[:2, :2] @ ctr + W[:2, 2]
+            W[:2, :2] = np.eye(2) + (1.0 - a_rs) * (W[:2, :2] - np.eye(2))
+            W[:2, 2] = t_c - W[:2, :2] @ ctr
         self.W = W
 
         W = self._deadzone(W.copy())
@@ -1059,8 +1148,15 @@ class Stabilizer:
                 total = np.eye(3)
                 s = 0.0
             self.W = self._scale(self.W, s)
+            self.wsx *= s
+            self.wsy *= s
+            self.qx *= s
+            self.qy *= s
         self.sat = 1.0 - s
         self.warp = np.ascontiguousarray(total[:2])
+        self.quad = ((self.qx * STAB_KX / (STAB_KY * STAB_KY),
+                      self.qy / STAB_KY)
+                     if STAB_QUAD and STAB_MODEL == "rs" else None)
         self.hist.append((time.time(), step))
         self.ms = (time.perf_counter() - t0) * 1e3
         return self.warp
@@ -1107,6 +1203,7 @@ class FollowPan:
     def __init__(self):
         self._lock = threading.Lock()
         self._x = self._y = 0.0
+        self._rx = self._ry = 0.0
         self._t = time.monotonic()
 
     def update(self, box):
@@ -1115,11 +1212,21 @@ class FollowPan:
             dt = max(0.0, min(0.2, now - self._t))
             self._t = now
             if box is None:
+                self._rx = self._ry = 0.0
                 tx = ty = 0.0
                 tau = FOLLOW_TAU_OFF
             else:
-                tx = box[0] + box[2] / 2.0 - PROC_W / 2.0
-                ty = box[1] + box[3] / 2.0 - PROC_H / 2.0
+                bx = box[0] + box[2] / 2.0 - PROC_W / 2.0
+                by = box[1] + box[3] / 2.0 - PROC_H / 2.0
+                dead = max(FOLLOW_DEAD_MIN,
+                           FOLLOW_DEAD_FRAC * max(box[2], box[3]))
+                ex, ey = bx - self._rx, by - self._ry
+                d = math.hypot(ex, ey)
+                if d > dead:
+                    f = (d - dead) / d
+                    self._rx += ex * f
+                    self._ry += ey * f
+                tx, ty = self._rx, self._ry
                 tau = FOLLOW_TAU
             a = 1.0 - math.exp(-dt / max(1e-3, tau))
             self._x += a * (tx - self._x)
@@ -1486,19 +1593,43 @@ class RtspRenderer:
                 stab_on = self.stab is not None and self.stab.enabled
                 fx = fy = 0.0
                 warp = None
+                quad = None
                 if view is not None:
-                    z, fx, fy, warp = view
+                    z, fx, fy, warp = view[:4]
+                    quad = view[4] if len(view) > 4 else None
                 H, W = bgr.shape[:2]
                 cw3 = crop_matrix(W, H, z, fx, fy)
+                bmode = (cv2.BORDER_CONSTANT if STAB_FREE
+                         else cv2.BORDER_REPLICATE)
                 if warp is None:
                     M = cw3[:2].copy()
+                    warp3 = None
                 else:
-                    M = (cw3 @ np.vstack([warp, (0.0, 0.0, 1.0)]))[:2].copy()
-                out = cv2.warpAffine(
-                    bgr, M, (RTSP_W, RTSP_H), flags=cv2.INTER_LINEAR,
-                    borderMode=(cv2.BORDER_CONSTANT if STAB_FREE
-                                else cv2.BORDER_REPLICATE),
-                    borderValue=(0, 0, 0))
+                    warp3 = np.vstack([warp, (0.0, 0.0, 1.0)])
+                    M = (cw3 @ warp3)[:2].copy()
+                if (warp3 is None or quad is None or RTSP_BANDS <= 1
+                        or (abs(quad[0]) + abs(quad[1])) * (H / 2.0) ** 2
+                        < 0.25):
+                    out = cv2.warpAffine(
+                        bgr, M, (RTSP_W, RTSP_H), flags=cv2.INTER_LINEAR,
+                        borderMode=bmode, borderValue=(0, 0, 0))
+                else:
+                    out = np.empty((RTSP_H, RTSP_W, 3), np.uint8)
+                    cyc = H / 2.0
+                    for k in range(RTSP_BANDS):
+                        r0 = k * RTSP_H // RTSP_BANDS
+                        r1 = (k + 1) * RTSP_H // RTSP_BANDS
+                        ycap = ((r0 + r1) / 2.0 - cw3[1, 2]) / cw3[1, 1]
+                        d2 = (ycap - cyc) ** 2
+                        w3 = warp3.copy()
+                        w3[0, 2] += quad[0] * d2
+                        w3[1, 2] += quad[1] * d2
+                        Mb = (cw3 @ w3)[:2].copy()
+                        Mb[1, 2] -= r0
+                        cv2.warpAffine(
+                            bgr, Mb, (RTSP_W, r1 - r0), dst=out[r0:r1],
+                            flags=cv2.INTER_LINEAR, borderMode=bmode,
+                            borderValue=(0, 0, 0))
                 if box is None:
                     vbox = None
                 else:
@@ -1659,7 +1790,7 @@ class GcsLink:
         x1, x2 = sorted((sx * fx, ex * fx))
         y1, y2 = sorted((sy * fy, ey * fy))
         if self.view is not None:
-            z, ox, oy, warp = self.view()
+            z, ox, oy, warp = self.view()[:4]
         else:
             z, ox, oy, warp = max(1.0, self.zoom()), 0.0, 0.0, None
         cw3 = crop_matrix(CAP_W, CAP_H, z, ox, oy)
@@ -2171,6 +2302,7 @@ class App:
         self.cmd = {"valid": False, "estop": False}
         self.rotate = (0.0, 0.0)
         self.gain = [0] * 10
+        self.center_pending = False
         self.sm = StateMachine()
         self.cmd_event = threading.Event()
         self.log = LatencyLog(every=int(os.environ.get("LAT_EVERY", "30")))
@@ -2191,6 +2323,9 @@ class App:
     def on_center(self, v):
         self.sm.reset()
         self.on_clear()
+        with self.lock:
+            self.center_pending = True
+        self.cmd_event.set()
 
     def on_rotate(self, yaw, pitch):
         with self.lock:
@@ -2211,6 +2346,8 @@ class App:
             c = dict(self.cmd)
             c["rotate"] = self.rotate
             c["gain"] = list(self.gain)
+            c["center"] = 1 if self.center_pending else 0
+            self.center_pending = False
         c["estop"] = self.sm.state is State.ESTOP
         return c
 
@@ -2257,7 +2394,7 @@ def fast_loop(app):
         if stab.enabled and not STAB_FREE:
             z *= STAB_ZOOM
         fx, fy = follow.offset()
-        return (z, fx, fy, stab.warp)
+        return (z, fx, fy, stab.warp, stab.quad)
 
     def stab_fit(m):
         if STAB_FREE:
@@ -2382,7 +2519,17 @@ def fast_loop(app):
                                 track_ok, box = False, None
                                 app.log.event("AUDIT_LOST")
             state = app.sm.step(track_ok, tof.latest_m, bumper.pressed)
-            follow.update(box)
+            fbox = box
+            if box is not None and stab.warp is not None:
+                kx, ky = CAP_W / PROC_W, CAP_H / PROC_H
+                wcx = (box[0] + box[2] / 2.0) * kx
+                wcy = (box[1] + box[3] / 2.0) * ky
+                sw = stab.warp
+                sx_ = sw[0, 0] * wcx + sw[0, 1] * wcy + sw[0, 2]
+                sy_ = sw[1, 0] * wcx + sw[1, 1] * wcy + sw[1, 2]
+                fbox = (sx_ / kx - box[2] / 2.0, sy_ / ky - box[3] / 2.0,
+                        box[2], box[3])
+            follow.update(fbox)
             cmd = cmdf.step(state, control_step(state, box, view_now()), box)
             with app.lock:
                 app.cmd = cmd
