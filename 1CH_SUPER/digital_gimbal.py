@@ -1,8 +1,22 @@
-
-
+import collections
+import csv
+import faulthandler
+import math
 import os
+import pickle
+import signal
+import socket
 import struct
+import subprocess
 import sys
+import termios
+import threading
+import time
+from enum import Enum
+from multiprocessing import shared_memory
+
+import cv2
+import numpy as np
 
 
 def _env_int(k, d):
@@ -11,6 +25,19 @@ def _env_int(k, d):
 
 def _env_float(k, d):
     return float(os.environ.get(k, str(d)))
+
+
+def _env_path(k, *parts):
+    return os.environ.get(k, os.path.join(*parts))
+
+
+BASE_DIR   = os.environ.get("GIMBAL_HOME", "/home/dbai")
+APP_DIR    = _env_path("APP_DIR", BASE_DIR, "1CH_SUPER")
+MODELS_DIR = _env_path("MODELS_DIR", BASE_DIR, "models")
+
+NANOTRACK_DIR  = _env_path("NANOTRACK_DIR", MODELS_DIR, "nanotrack")
+HEF_SUPERPOINT = _env_path("HEF_SUPERPOINT", MODELS_DIR, "superpoint.hef")
+LOG_DIR        = _env_path("LOG_DIR", APP_DIR, "logs")
 
 
 CAP_W   = _env_int("CAP_W", 1280)
@@ -46,7 +73,6 @@ TRACK_LOST_FRAMES = _env_int("TRACK_LOST_FRAMES", 10)
 
 TERM_HOLD_FRAC   = _env_float("TERM_HOLD_FRAC", 0.12)
 TERM_CONF_THRESH = _env_float("TERM_CONF_THRESH", 0.25)
-NANOTRACK_DIR = os.environ.get("NANOTRACK_DIR", "/home/gimbal/models/nanotrack")
 
 YAW_KP          = _env_float("YAW_KP", 0.8)
 YAW_RATE_MAX    = _env_float("YAW_RATE_MAX", 45.0)
@@ -90,10 +116,6 @@ REACQ_MIN_MATCHES = _env_int("REACQ_MIN_MATCHES", 12)
 AUDIT_EVERY = _env_int("AUDIT_EVERY", 10)
 AUDIT_FAILS = _env_int("AUDIT_FAILS", 5)
 AUDIT_REFRESH = _env_int("AUDIT_REFRESH", 10)
-
-HEF_SUPERPOINT = os.environ.get("HEF_SUPERPOINT", "/home/gimbal/models/superpoint.hef")
-
-LOG_DIR = os.environ.get("LOG_DIR", "/home/gimbal/1CH_SUPER/logs")
 
 RTSP_ENABLE  = os.environ.get("RTSP", "1") not in ("0", "", "false")
 RTSP_PORT    = _env_int("RTSP_PORT", 554)
@@ -160,12 +182,6 @@ FCC_RETRY = _env_float("FCC_RETRY", 2.0)
 TOF_I2C_BUS  = _env_int("TOF_I2C_BUS", 1)
 TOF_I2C_ADDR = _env_int("TOF_I2C_ADDR", 0x29)
 BUMPER_GPIO  = _env_int("BUMPER_GPIO", 17)
-
-
-import pickle
-import struct
-import numpy as np
-from multiprocessing import shared_memory
 
 
 if sys.version_info >= (3, 13):
@@ -259,10 +275,6 @@ class BlobSlot(_Slot):
         return pickle.loads(payload), t, fid, seq
 
 
-import time
-from enum import Enum
-
-
 class State(Enum):
     IDLE = 0
     TRACK = 1
@@ -328,10 +340,6 @@ class StateMachine:
                 self._to(State.REACQUIRE, "terminal lost")
 
         return self.state
-
-
-import math
-import time
 
 
 _HTAN = math.tan(math.radians(CAM_HFOV_DEG) / 2.0)
@@ -444,12 +452,6 @@ class CmdFilter:
                 return dict(self.last)
         self.last = None
         return cmd
-
-
-import os
-import time
-import cv2
-import numpy as np
 
 
 EXEMPLAR = 127
@@ -754,14 +756,6 @@ def make_tracker():
         return CsrtTracker()
 
 
-import math
-import threading
-import time
-
-import cv2
-import numpy as np
-
-
 _LK = dict(winSize=(15, 15), maxLevel=2,
            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03))
 
@@ -865,11 +859,6 @@ class Stabilizer:
                     max(-sy, min(sy, self.c[1])))
 
 
-import math
-import threading
-import time
-
-
 class DigitalZoom:
     def __init__(self):
         self._z = 1.0
@@ -934,13 +923,6 @@ class FollowPan:
             return self._x, self._y
 
 
-import subprocess
-import threading
-import time
-import cv2
-import numpy as np
-
-
 class CameraCSI:
     def __init__(self, index=0):
         from picamera2 import Picamera2
@@ -993,12 +975,11 @@ class CameraV4L2:
         for c in [c.strip() for c in CAM_CTRLS.split(",") if c.strip()]:
             subprocess.run(["v4l2-ctl", "-d", f"/dev/video{index}", "-c", c],
                            capture_output=True)
-        got = (int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-               int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
         self._cond = threading.Condition()
         self._frame, self._t, self._seq = None, 0.0, 0
         self._run = True
-        threading.Thread(target=self._reader, daemon=True).start()
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
 
     def _reader(self):
         i = 0
@@ -1029,6 +1010,7 @@ class CameraV4L2:
 
     def release(self):
         self._run = False
+        self._thread.join(timeout=2.0)
         self.cap.release()
 
 
@@ -1037,11 +1019,6 @@ def Camera(index=0):
         return CameraCSI(index)
     except Exception as e:
         return CameraV4L2(index)
-
-
-import subprocess
-import threading
-import time
 
 
 UNDERVOLT_MASK = 0x1 | 0x10000
@@ -1107,12 +1084,6 @@ class Watchdog:
             time.sleep(0.02)
 
 
-import collections
-import csv
-import os
-import time
-
-
 class LatencyLog:
     def __init__(self, every=1):
         os.makedirs(LOG_DIR, exist_ok=True)
@@ -1159,12 +1130,6 @@ class LatencyLog:
 
     def close(self):
         self._f.close()
-
-
-import threading
-import time
-
-import cv2
 
 
 class RtspServer:
@@ -1310,8 +1275,6 @@ class RtspRenderer:
                 if box is None:
                     vbox = None
                 else:
-
-
                     kx, ky = W / PROC_W, H / PROC_H
                     vbox = ((box[0] * kx - x0) * RTSP_W / cw,
                             (box[1] * ky - y0) * RTSP_H / ch,
@@ -1358,11 +1321,6 @@ class RtspRenderer:
                 self.rtsp.push(out)
             except Exception:
                 pass
-
-
-import socket
-import struct
-import threading
 
 
 def _s8(v):
@@ -1478,13 +1436,6 @@ class GcsLink:
         box = None if (x2 - x1 < 2 or y2 - y1 < 2) else (x1, y1, x2 - x1, y2 - y1)
         if self.on_track:
             self.on_track(cx, cy, box)
-
-
-import os
-import struct
-import termios
-import threading
-import time
 
 
 def _sum8(body):
@@ -1624,10 +1575,6 @@ class FccLink:
                 buf = buf[2:]
 
 
-import threading
-import time
-
-
 class Tof:
     def __init__(self):
         self._m = None
@@ -1697,11 +1644,6 @@ class Bumper:
             self._btn.close()
 
 
-import os
-import numpy as np
-import cv2
-
-
 CELL = 8
 
 
@@ -1758,15 +1700,6 @@ class SuperPointHef:
         return postprocess(semi, desc)
 
 
-import os
-import numpy as np
-import cv2
-
-
-import numpy as np
-import cv2
-
-
 class OrbReacquirer:
     name = "orb"
 
@@ -1818,12 +1751,6 @@ class OrbReacquirer:
         w, h = self.anchor_size
         return (float(cx - w / 2), float(cy - h / 2), float(w), float(h)), len(good)
 
-
-import faulthandler
-import os
-import time
-import numpy as np
-import cv2
 
 faulthandler.enable()
 
@@ -1940,7 +1867,6 @@ def _stop(signum, frame):
 
 
 def service_main():
-    import signal
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     try:
@@ -2045,14 +1971,6 @@ def _to_proc_gray(bgr):
     return cv2.cvtColor(cv2.resize(bgr, (PROC_W, PROC_H)), cv2.COLOR_BGR2GRAY)
 
 
-import os
-import signal
-import subprocess
-import sys
-import threading
-import time
-
-
 NO_HAILO = os.environ.get("NO_HAILO", "0") not in ("0", "", "false")
 DEFAULT_BOX = 48
 
@@ -2128,8 +2046,6 @@ def fast_loop(app):
     follow = FollowPan()
 
     def view_now():
-
-
         z, ox, oy = stab.view(zoom.value())
         fx, fy = follow.offset()
         sx = (PROC_W - PROC_W / z) / 2.0
