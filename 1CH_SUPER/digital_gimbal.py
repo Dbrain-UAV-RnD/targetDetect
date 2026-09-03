@@ -57,11 +57,14 @@ SP_W, SP_H       = _env_int("SP_W", 640), _env_int("SP_H", 400)
 CAM_HFOV_DEG = _env_float("CAM_HFOV_DEG", 66.0)
 CAM_VFOV_DEG = _env_float("CAM_VFOV_DEG", 41.0)
 
-TRACKER = os.environ.get("TRACKER", "nanotrack")
 TRACK_BUDGET_MS = _env_float("TRACK_BUDGET_MS", 20.0)
 TRACK_CONF_THRESH = _env_float("TRACK_CONF_THRESH", 0.5)
 TRACK_APCE_MIN = _env_float("TRACK_APCE_MIN", 0.0)
 BOX_MAX_FRAC = _env_float("BOX_MAX_FRAC", 0.5)
+BOX_SCALE_LR = _env_float("BOX_SCALE_LR", 0.5)
+BOX_AUDIT_LR = _env_float("BOX_AUDIT_LR", 0.3)
+BOX_SCALE_MIN = _env_float("BOX_SCALE_MIN", 0.5)
+BOX_SCALE_MAX = _env_float("BOX_SCALE_MAX", 2.0)
 TRACK_GRACE_S = _env_float("TRACK_GRACE_S", 0.5)
 COLOR_MAX_D = _env_float("COLOR_MAX_D", 0.45)
 COLOR0_MAX_D = _env_float("COLOR0_MAX_D", 0.7)
@@ -86,12 +89,32 @@ HAILO_RESULT_MAX_AGE_S = _env_float("HAILO_RESULT_MAX_AGE_S", 0.5)
 STAB_ENABLE  = os.environ.get("STAB", "1") not in ("0", "", "false", "no")
 STAB_W       = _env_int("STAB_W", 240)
 STAB_H       = _env_int("STAB_H", 135)
-STAB_MARGIN  = _env_float("STAB_MARGIN", 0.05)
-STAB_TAU     = _env_float("STAB_TAU", 0.4)
-STAB_TAU_MIN = _env_float("STAB_TAU_MIN", 0.1)
-STAB_TAU_MAX = _env_float("STAB_TAU_MAX", 2.0)
-STAB_CORNERS = _env_int("STAB_CORNERS", 40)
+STAB_ZOOM    = _env_float("STAB_ZOOM", 1.15)
+STAB_FREE    = os.environ.get("STAB_FREE", "1") not in ("0", "", "false", "no")
+STAB_FREE_PX = _env_float("STAB_FREE_PX", 200.0)
+STAB_TAU     = _env_float("STAB_TAU", 0.60)
+STAB_TAU_MIN = _env_float("STAB_TAU_MIN", 0.10)
+STAB_TAU_MAX = _env_float("STAB_TAU_MAX", 2.00)
+STAB_CORNERS = _env_int("STAB_CORNERS", 60)
+STAB_QUALITY = _env_float("STAB_QUALITY", 0.01)
+STAB_MIN_DIST = _env_int("STAB_MIN_DIST", 8)
 STAB_MIN_PTS = _env_int("STAB_MIN_PTS", 12)
+STAB_FB_ERR  = _env_float("STAB_FB_ERR", 1.0)
+STAB_HIST    = _env_int("STAB_HIST", 96)
+STAB_DEAD    = _env_float("STAB_DEAD", 1.0)
+STAB_DEAD_DEG = _env_float("STAB_DEAD_DEG", 0.03)
+STAB_WALL    = _env_float("STAB_WALL", 2.0)
+STAB_STEP_MAX = _env_float("STAB_STEP_MAX", 0.0)
+STAB_DC_TAU  = _env_float("STAB_DC_TAU", 0.0)
+STAB_RS_MS   = _env_float("STAB_RS_MS", 0.0)
+STAB_RS_TAU  = _env_float("STAB_RS_TAU", 0.08)
+STAB_CLAHE   = _env_float("STAB_CLAHE", 6.0)
+STAB_KX      = CAP_W / float(STAB_W)
+STAB_KY      = CAP_H / float(STAB_H)
+STAB_LK = dict(winSize=(15, 15), maxLevel=2,
+               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                         20, 0.03))
+DT_MAX = 0.25
 
 TERM_LOCK_FRAC      = _env_float("TERM_LOCK_FRAC", 0.35)
 TERM_LOCK_TIMEOUT_S = _env_float("TERM_LOCK_TIMEOUT_S", 3.0)
@@ -176,7 +199,6 @@ assert FCC_RX_SIZE == 96, FCC_RX_SIZE
 
 FCC_PORT  = os.environ.get("FCC_PORT", "/dev/ttyAMA3")
 FCC_BAUD  = _env_int("FCC_BAUD", 115200)
-FCC_HZ    = _env_float("FCC_HZ", 50)
 FCC_RETRY = _env_float("FCC_RETRY", 2.0)
 
 TOF_I2C_BUS  = _env_int("TOF_I2C_BUS", 1)
@@ -366,6 +388,19 @@ def speed_profile(state):
     return SPEED_MAX
 
 
+def view_norm(view, cx, cy):
+    if view is None:
+        return (max(-1.0, min(1.0, (cx - PROC_W / 2.0) / (PROC_W / 2.0))),
+                max(-1.0, min(1.0, (PROC_H / 2.0 - cy) / (PROC_H / 2.0))))
+    z, fx, fy, warp = view
+    cw3 = crop_matrix(CAP_W, CAP_H, z, fx, fy)
+    M = (cw3[:2] if warp is None
+         else (cw3 @ np.vstack([warp, (0.0, 0.0, 1.0)]))[:2])
+    px, py = apply_pt(M, cx * CAP_W / PROC_W, cy * CAP_H / PROC_H)
+    return (max(-1.0, min(1.0, (px - RTSP_W / 2.0) / (RTSP_W / 2.0))),
+            max(-1.0, min(1.0, (RTSP_H / 2.0 - py) / (RTSP_H / 2.0))))
+
+
 def control_step(state, box, view=None):
     if state in (State.TRACK, State.TERMINAL) and box is not None:
         x, y, w, h = box
@@ -375,11 +410,10 @@ def control_step(state, box, view=None):
         yaw, pitch = target_angles(PROC_W / 2.0 + ex, PROC_H / 2.0 + ey)
         yaw_rate = max(-YAW_RATE_MAX, min(YAW_RATE_MAX, YAW_KP * yaw))
 
-        z, ox, oy = view if view is not None else (1.0, 0.0, 0.0)
-        hw, hh = PROC_W / 2.0, PROC_H / 2.0
+        nx, ny = view_norm(view, cx, cy)
         return {"valid": True,
-                "nx": max(-1.0, min(1.0, z * (cx - hw - ox) / hw)),
-                "ny": max(-1.0, min(1.0, z * (hh + oy - cy) / hh)),
+                "nx": nx,
+                "ny": ny,
                 "yaw": yaw, "pitch": pitch,
                 "yaw_rate": yaw_rate,
                 "speed": speed_profile(state)}
@@ -462,43 +496,6 @@ CONTEXT = 0.5
 PENALTY_K = 0.148
 WIN_INFLUENCE = 0.462
 LR = 0.390
-
-
-class CsrtTracker:
-    name = "csrt"
-
-    def __init__(self):
-        self._t = None
-        self.box = None
-        self.score = 0.0
-        self.last_ms = 0.0
-
-    def start(self, img, box, keep_ref=False):
-        make = getattr(cv2, "TrackerCSRT_create", None) or cv2.legacy.TrackerCSRT_create
-        self._t = make()
-        self._t.init(img, tuple(int(v) for v in box))
-        self.box = tuple(box)
-
-    def update(self, img):
-        if self._t is None:
-            return False, None
-        t0 = time.perf_counter()
-        ok, b = self._t.update(img)
-        self.last_ms = (time.perf_counter() - t0) * 1e3
-        self.score = 1.0 if ok else 0.0
-        self.box = tuple(b) if ok else None
-        return ok, self.box
-
-    def feedforward(self, dx, dy):
-        pass
-
-    def stop(self):
-        self._t = None
-        self.box = None
-
-    @property
-    def active(self):
-        return self._t is not None
 
 
 class NanoTracker:
@@ -630,6 +627,11 @@ class NanoTracker:
         self.color_d = 0.0
         self.color_d0 = 0.0
 
+    def rescale(self, h, img):
+        h = float(np.clip(h, 10, img.shape[0]))
+        self.sz[1] = h
+        self.sz[0] = float(np.clip(h * self.aspect, 10, img.shape[1]))
+
     def feedforward(self, dx, dy):
 
         if self.zf is not None:
@@ -724,7 +726,8 @@ class NanoTracker:
         if self._miss == 0:
             s_pred = np.sqrt(max(1e-6, bw * bh) /
                              max(1e-6, self.sz[0] * self.sz[1]))
-            s_new = (1 - lr) + s_pred * lr
+            lr_s = lr * BOX_SCALE_LR
+            s_new = (1 - lr_s) + s_pred * lr_s
             h_new = np.clip(self.sz[1] * s_new, 10, img.shape[0])
             self.sz[1] = h_new
             self.sz[0] = np.clip(h_new * self.aspect, 10, img.shape[1])
@@ -747,82 +750,214 @@ class NanoTracker:
         return self.zf is not None
 
 
+class DisabledTracker:
+    name = "disabled"
+    active = False
+
+    def __init__(self):
+        self.last_ms = 0.0
+        self.score = 0.0
+        self.apce = 0.0
+        self.frac = 0.0
+
+    def start(self, img, box, keep_ref=False):
+        pass
+
+    def update(self, img):
+        return False, None
+
+    def feedforward(self, dx, dy):
+        pass
+
+    def stop(self):
+        pass
+
+
 def make_tracker():
-    if TRACKER == "csrt":
-        return CsrtTracker()
-    try:
-        return NanoTracker()
-    except Exception as e:
-        return CsrtTracker()
+    return NanoTracker()
 
 
 _LK = dict(winSize=(15, 15), maxLevel=2,
            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03))
 
 
+def apply_pt(m, x, y):
+    return (m[0, 0] * x + m[0, 1] * y + m[0, 2],
+            m[1, 0] * x + m[1, 1] * y + m[1, 2])
+
+
+def xform_box(m, box):
+    x, y, w, h = box
+    cx, cy = apply_pt(m, x + 0.5 * w, y + 0.5 * h)
+    sc = math.hypot(m[0, 0], m[1, 0])
+    w *= sc
+    h *= sc
+    return (cx - 0.5 * w, cy - 0.5 * h, w, h)
+
+
+def crop_matrix(W, H, z, fx, fy):
+    cw = max(2.0, W / z)
+    ch = max(2.0, H / z)
+    x0 = (W - cw) / 2.0 + fx * W / PROC_W
+    y0 = (H - ch) / 2.0 + fy * H / PROC_H
+    if not STAB_FREE:
+        x0 = max(0.0, min(W - cw, x0))
+        y0 = max(0.0, min(H - ch, y0))
+    return np.array([[RTSP_W / cw, 0.0, -RTSP_W / cw * x0],
+                     [0.0, RTSP_H / ch, -RTSP_H / ch * y0],
+                     [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
+def _gain_map(v, lo, mid, hi):
+    v = max(-100.0, min(100.0, float(v)))
+    if v >= 0.0:
+        return mid + (hi - mid) * v / 100.0
+    return mid + (mid - lo) * v / 100.0
+
+
 class Stabilizer:
 
     def __init__(self):
         self.lock = threading.Lock()
+        self.clahe = (cv2.createCLAHE(clipLimit=STAB_CLAHE, tileGridSize=(8, 8))
+                      if STAB_CLAHE > 0 else None)
         self.enabled = STAB_ENABLE
         self.tau = STAB_TAU
-        self.margin = STAB_MARGIN
+        self.corners = STAB_CORNERS
+        self.min_pts = STAB_MIN_PTS
+        self.free_px = STAB_FREE_PX
         self.ms = 0.0
-        self.response = 0
-        self.prev = None
-        self.c = np.zeros(2)
-        self.t = 0.0
+        self.hist = collections.deque(maxlen=STAB_HIST)
+        self.reset()
 
     def reset(self):
         with self.lock:
+            self._reset_req = False
+            self.hist.clear()
             self.prev = None
-            self.c[:] = 0.0
-            self.t = 0.0
+            self.W = np.eye(3)
+            self.warp = None
+            self.step_d = None
+            self.response = 0
+            self.fail = 0
+            self.sat = 0.0
+            self.clock = 0.0
+            self.vx = 0.0
+            self.vy = 0.0
+            self.dcx = 0.0
+            self.dcy = 0.0
+
+    def request_reset(self):
+        self._reset_req = True
 
     def set_mode(self, v):
         if v == GCS_STAB_RESET:
             self.reset()
             return
         on = bool(v)
-        with self.lock:
-            if on and not self.enabled:
-                self.prev = None
-                self.c[:] = 0.0
-                self.t = 0.0
-            self.enabled = on
+        if on and not self.enabled:
+            self.reset()
+        self.enabled = on
 
     def set_alpha(self, a):
         a = max(0, min(100, int(a))) / 100.0
         with self.lock:
             self.tau = STAB_TAU_MIN + a * (STAB_TAU_MAX - STAB_TAU_MIN)
 
-    def _estimate(self, prev, small, mask=None):
-        p0 = cv2.goodFeaturesToTrack(prev, STAB_CORNERS, 0.01, 8, mask=mask)
-        if p0 is None or len(p0) < STAB_MIN_PTS:
-            return None, 0
-        p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, small, p0, None, **_LK)
-        pb, stb, _ = cv2.calcOpticalFlowPyrLK(small, prev, p1, None, **_LK)
-        err = np.linalg.norm(p0 - pb, axis=2).ravel()
-        ok = (st.ravel() == 1) & (stb.ravel() == 1) & (err < 1.0)
-        n = int(ok.sum())
-        if n < STAB_MIN_PTS:
-            return None, n
-        d = (p1 - p0)[ok].reshape(-1, 2)
-        return np.array((np.median(d[:, 0]) * (PROC_W / STAB_W),
-                         np.median(d[:, 1]) * (PROC_H / STAB_H))), n
-
-    def update(self, gray, t, mask_box=None):
+    def set_gain(self, v):
+        if len(v) < 10:
+            return
         with self.lock:
-            enabled, tau = self.enabled, self.tau
-            dt = t - self.t if self.t > 0.0 else 1.0 / 30.0
-            self.t = t
-        if not enabled:
-            self.prev = None
+            self.free_px = _gain_map(v[7], 20.0, STAB_FREE_PX, 600.0)
+            self.min_pts = int(round(_gain_map(v[8], 4, STAB_MIN_PTS, 40)))
+            self.corners = int(round(_gain_map(v[9], 10, STAB_CORNERS, 180)))
+
+    def budget(self):
+        with self.lock:
+            return (self.free_px, self.free_px)
+
+    def _gray(self, proc):
+        g = proc if proc.ndim == 2 else cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        if g.shape[1] != STAB_W or g.shape[0] != STAB_H:
+            g = cv2.resize(g, (STAB_W, STAB_H), interpolation=cv2.INTER_AREA)
+        return self.clahe.apply(g) if self.clahe is not None else g
+
+    @staticmethod
+    def _track(prev, curr, p0):
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, curr, p0, None, **STAB_LK)
+        pb, stb, _ = cv2.calcOpticalFlowPyrLK(curr, prev, p1, None, **STAB_LK)
+        err = np.linalg.norm(p0 - pb, axis=2).ravel()
+        ok = (st.ravel() == 1) & (stb.ravel() == 1) & (err < STAB_FB_ERR)
+        return p0[ok], p1[ok]
+
+    @staticmethod
+    def _scale(W, s):
+        B = np.eye(3)
+        B[0, 0] = B[1, 1] = 1.0 + s * (W[0, 0] - 1.0)
+        B[1, 0] = s * W[1, 0]
+        B[0, 1] = -B[1, 0]
+        B[0, 2] = s * W[0, 2]
+        B[1, 2] = s * W[1, 2]
+        return B
+
+    @staticmethod
+    def _to_capture(W):
+        m = np.eye(3)
+        m[0, 0] = W[0, 0]
+        m[1, 1] = W[1, 1]
+        m[0, 1] = W[0, 1] * STAB_KX / STAB_KY
+        m[1, 0] = W[1, 0] * STAB_KY / STAB_KX
+        m[0, 2] = W[0, 2] * STAB_KX
+        m[1, 2] = W[1, 2] * STAB_KY
+        return m
+
+    def _rolling_shutter(self):
+        if STAB_RS_MS <= 0.0:
             return None
+        r = (STAB_RS_MS / 1000.0) / float(CAP_H)
+        m = np.eye(3)
+        m[0, 1] = -self.vx * r
+        m[0, 2] = self.vx * r * CAP_H / 2.0
+        m[1, 1] = 1.0 - self.vy * r
+        m[1, 2] = self.vy * r * CAP_H / 2.0
+        return m
+
+    @staticmethod
+    def _deadzone(W):
+        tx, ty = W[0, 2] * STAB_KX, W[1, 2] * STAB_KY
+        d = math.hypot(tx, ty)
+        if d > 1e-9:
+            f = max(0.0, d - STAB_DEAD) / d
+            W[0, 2] *= f
+            W[1, 2] *= f
+        sc = math.hypot(W[0, 0], W[1, 0])
+        ang = math.atan2(W[1, 0], W[0, 0])
+        if abs(ang) > 1e-12:
+            a2 = math.copysign(max(0.0, abs(ang) - math.radians(STAB_DEAD_DEG)), ang)
+            W[0, 0] = W[1, 1] = sc * math.cos(a2)
+            W[1, 0] = sc * math.sin(a2)
+            W[0, 1] = -W[1, 0]
+        return W
+
+    def update(self, proc, fit, budget, mask_box=None):
+        if not self.enabled or proc is None:
+            self.warp = None
+            self.step_d = None
+            return None
+        if self._reset_req:
+            self.reset()
         t0 = time.perf_counter()
-        small = cv2.resize(gray, (STAB_W, STAB_H),
-                           interpolation=cv2.INTER_AREA)
-        prev, self.prev = self.prev, small
+        now = time.monotonic()
+        dt = min(DT_MAX, now - self.clock) if self.clock else 0.0
+        self.clock = now
+
+        g = self._gray(proc)
+        if self.prev is None:
+            self.prev = g
+            self.warp = None
+            self.step_d = None
+            return None
+
         mask = None
         if mask_box is not None:
             x, y, w, h = mask_box
@@ -832,31 +967,103 @@ class Stabilizer:
                  int((y + h + py) * STAB_H / PROC_H) + 1,
                  max(0, int((x - px) * STAB_W / PROC_W)):
                  int((x + w + px) * STAB_W / PROC_W) + 1] = 0
-        d, n = (None, 0) if prev is None else self._estimate(prev, small, mask)
-        raw_d = d
-        if d is None:
-            d = np.zeros(2)
-        dt = max(1e-3, min(0.1, dt))
-        keep = math.exp(-dt / max(1e-3, tau))
-        with self.lock:
-            self.c = (self.c + d) * keep
-            cmax = (self.margin * PROC_W, self.margin * PROC_H)
-            self.c[0] = max(-cmax[0], min(cmax[0], self.c[0]))
-            self.c[1] = max(-cmax[1], min(cmax[1], self.c[1]))
-            self.response = n
-            self.ms = (time.perf_counter() - t0) * 1e3
-        return raw_d
 
-    def view(self, zoom):
-        z = max(1.0, zoom)
         with self.lock:
-            if not self.enabled:
-                return z, 0.0, 0.0
-            z = max(z, 1.0 / (1.0 - 2.0 * self.margin))
-            sx = (PROC_W - PROC_W / z) / 2.0
-            sy = (PROC_H - PROC_H / z) / 2.0
-            return (z, max(-sx, min(sx, self.c[0])),
-                    max(-sy, min(sy, self.c[1])))
+            corners, min_pts = self.corners, self.min_pts
+        m = None
+        p0 = cv2.goodFeaturesToTrack(self.prev, maxCorners=corners,
+                                     qualityLevel=STAB_QUALITY,
+                                     minDistance=STAB_MIN_DIST, blockSize=7,
+                                     mask=mask)
+        if p0 is not None and len(p0) >= min_pts:
+            a, b = self._track(self.prev, g, p0)
+            self.response = len(a)
+            if len(a) >= min_pts:
+                m, _ = cv2.estimateAffinePartial2D(
+                    a, b, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+        else:
+            self.response = 0
+        self.prev = g
+
+        if m is None:
+            self.fail += 1
+            step = np.eye(3)
+            self.step_d = None
+        else:
+            self.fail = 0
+            step = np.vstack([m, (0.0, 0.0, 1.0)])
+            self.step_d = (step[0, 2] * PROC_W / STAB_W,
+                           step[1, 2] * PROC_H / STAB_H)
+
+        if dt > 0.0:
+            av = 1.0 - math.exp(-dt / STAB_RS_TAU)
+            self.vx += av * (step[0, 2] * STAB_KX / dt - self.vx)
+            self.vy += av * (step[1, 2] * STAB_KY / dt - self.vy)
+
+        if STAB_DC_TAU > 0.0 and dt > 0.0:
+            a_dc = 1.0 - math.exp(-dt / STAB_DC_TAU)
+            self.dcx += a_dc * (step[0, 2] - self.dcx)
+            self.dcy += a_dc * (step[1, 2] - self.dcy)
+            step = step.copy()
+            step[0, 2] -= self.dcx
+            step[1, 2] -= self.dcy
+
+        if STAB_STEP_MAX > 0.0:
+            d = math.hypot(step[0, 2] * STAB_KX, step[1, 2] * STAB_KY)
+            if d > STAB_STEP_MAX:
+                f = STAB_STEP_MAX / d
+                step = step.copy()
+                step[0, 2] *= f
+                step[1, 2] *= f
+
+        det = step[0, 0] ** 2 + step[1, 0] ** 2
+        step_inv = np.eye(3)
+        if det >= 1e-9:
+            step_inv[0, 0] = step_inv[1, 1] = step[0, 0] / det
+            step_inv[0, 1] = step[1, 0] / det
+            step_inv[1, 0] = -step_inv[0, 1]
+            step_inv[0, 2] = -(step_inv[0, 0] * step[0, 2]
+                               + step_inv[0, 1] * step[1, 2])
+            step_inv[1, 2] = -(step_inv[1, 0] * step[0, 2]
+                               + step_inv[1, 1] * step[1, 2])
+        W = self.W @ step_inv
+
+        u = min(1.0, max(abs(W[0, 2]) * STAB_KX / budget[0],
+                         abs(W[1, 2]) * STAB_KY / budget[1]))
+        with self.lock:
+            tau = self.tau / (1.0 + STAB_WALL * u * u)
+        alpha = 1.0 - math.exp(-dt / tau) if dt > 0.0 else 0.0
+        W = self._scale(W, 1.0 - alpha)
+        self.W = W
+
+        W = self._deadzone(W.copy())
+        rs = self._rolling_shutter()
+
+        def compose(f):
+            Wc = self._to_capture(W if f >= 1.0 else self._scale(W, f))
+            return Wc if rs is None else Wc @ rs
+
+        s = 1.0
+        total = compose(1.0)
+        if not fit(total[:2]):
+            lo, hi = 0.0, 1.0
+            for _ in range(6):
+                mid = (lo + hi) / 2.0
+                if fit(compose(mid)[:2]):
+                    lo = mid
+                else:
+                    hi = mid
+            s = lo
+            total = compose(s)
+            if not fit(total[:2]):
+                total = np.eye(3)
+                s = 0.0
+            self.W = self._scale(self.W, s)
+        self.sat = 1.0 - s
+        self.warp = np.ascontiguousarray(total[:2])
+        self.hist.append((time.time(), step))
+        self.ms = (time.perf_counter() - t0) * 1e3
+        return self.warp
 
 
 class DigitalZoom:
@@ -1258,28 +1465,27 @@ class RtspRenderer:
             try:
                 uz = z = max(1.0, zoom)
                 stab_on = self.stab is not None and self.stab.enabled
-                ox = oy = 0.0
+                fx = fy = 0.0
+                warp = None
                 if view is not None:
-
-                    z, ox, oy = view
-                elif self.stab is not None:
-                    z, ox, oy = self.stab.view(z)
+                    z, fx, fy, warp = view
                 H, W = bgr.shape[:2]
-                cw, ch = max(2, int(W / z)), max(2, int(H / z))
-                x0 = (W - cw) // 2 + int(round(ox * W / PROC_W))
-                y0 = (H - ch) // 2 + int(round(oy * H / PROC_H))
-                x0 = max(0, min(W - cw, x0))
-                y0 = max(0, min(H - ch, y0))
-                out = cv2.resize(bgr[y0:y0 + ch, x0:x0 + cw],
-                                 (RTSP_W, RTSP_H))
+                cw3 = crop_matrix(W, H, z, fx, fy)
+                if warp is None:
+                    M = cw3[:2].copy()
+                else:
+                    M = (cw3 @ np.vstack([warp, (0.0, 0.0, 1.0)]))[:2].copy()
+                out = cv2.warpAffine(
+                    bgr, M, (RTSP_W, RTSP_H), flags=cv2.INTER_LINEAR,
+                    borderMode=(cv2.BORDER_CONSTANT if STAB_FREE
+                                else cv2.BORDER_REPLICATE),
+                    borderValue=(0, 0, 0))
                 if box is None:
                     vbox = None
                 else:
                     kx, ky = W / PROC_W, H / PROC_H
-                    vbox = ((box[0] * kx - x0) * RTSP_W / cw,
-                            (box[1] * ky - y0) * RTSP_H / ch,
-                            box[2] * kx * RTSP_W / cw,
-                            box[3] * ky * RTSP_H / ch)
+                    vbox = xform_box(M, (box[0] * kx, box[1] * ky,
+                                         box[2] * kx, box[3] * ky))
                 if vbox is None:
                     self._sbox = None
                 else:
@@ -1330,7 +1536,7 @@ def _s8(v):
 class GcsLink:
     def __init__(self, on_track=None, on_clear=None, on_center=None,
                  on_ai_mode=None, on_zoom_rate=None, on_zoom_abs=None,
-                 on_stab_mode=None, on_stab_alpha=None,
+                 on_stab_mode=None, on_stab_alpha=None, on_gain=None,
                  zoom=None, view=None, port=GCS_UDP_PORT):
         self.on_track = on_track
         self.on_clear = on_clear
@@ -1340,6 +1546,7 @@ class GcsLink:
         self.on_zoom_abs = on_zoom_abs
         self.on_stab_mode = on_stab_mode
         self.on_stab_alpha = on_stab_alpha
+        self.on_gain = on_gain
         self.zoom = zoom or (lambda: 1.0)
         self.view = view
         self.port = port
@@ -1407,6 +1614,10 @@ class GcsLink:
         elif cmd == CMD_STABILIZER_ALPHA:
             if self.on_stab_alpha:
                 self.on_stab_alpha(msg[p])
+
+        elif cmd == CMD_SET_GAIN:
+            if self.on_gain:
+                self.on_gain([_s8(b) for b in msg[p:p + 10]])
 
         elif cmd == CMD_AI_MODE:
             if self.on_ai_mode:
@@ -1502,10 +1713,11 @@ def _open(path, baud):
 
 
 class FccLink:
-    def __init__(self, command_fn, port=FCC_PORT, baud=FCC_BAUD, hz=FCC_HZ):
+    def __init__(self, command_fn, sync, port=FCC_PORT, baud=FCC_BAUD):
         self.command_fn = command_fn
+        self.sync = sync
+        self.sync_timeout = 2.0 / max(1.0, CAP_FPS)
         self.port, self.baud = port, baud
-        self.period = 1.0 / max(1.0, hz)
         self.last_rx = None
         self.last_rx_t = 0.0
         self._run = True
@@ -1521,13 +1733,11 @@ class FccLink:
     def _loop(self):
         fd = None
         buf = b""
-        next_t = time.monotonic()
         while self._run:
             if fd is None:
                 try:
                     fd = _open(self.port, self.baud)
                     buf = b""
-                    next_t = time.monotonic()
                 except Exception:
                     time.sleep(FCC_RETRY)
                     continue
@@ -1546,12 +1756,8 @@ class FccLink:
                 fd = None
                 time.sleep(FCC_RETRY)
                 continue
-            next_t += self.period
-            d = next_t - time.monotonic()
-            if d > 0:
-                time.sleep(d)
-            else:
-                next_t = time.monotonic()
+            self.sync.wait(self.sync_timeout)
+            self.sync.clear()
         if fd is not None:
             try:
                 os.close(fd)
@@ -1700,61 +1906,6 @@ class SuperPointHef:
         return postprocess(semi, desc)
 
 
-class OrbReacquirer:
-    name = "orb"
-
-    def __init__(self):
-        self.orb = cv2.ORB_create(nfeatures=1000, fastThreshold=12)
-        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-        self.anchor_kp = None
-        self.anchor_desc = None
-        self.anchor_size = None
-
-    def set_anchor(self, gray, box):
-        x, y, w, h = (int(v) for v in box)
-        roi = gray[max(0, y):y + h, max(0, x):x + w]
-        if roi.size == 0:
-            return False
-        kp, desc = self.orb.detectAndCompute(roi, None)
-        if desc is None or len(kp) < REACQ_MIN_MATCHES:
-            return False
-        if len(kp) > ANCHOR_MAX_KP:
-            idx = np.argsort([-k.response for k in kp])[:ANCHOR_MAX_KP]
-            kp = [kp[i] for i in idx]
-            desc = desc[idx]
-        self.anchor_kp = np.array([(k.pt[0] - w / 2, k.pt[1] - h / 2) for k in kp],
-                                  np.float32)
-        self.anchor_desc = desc
-        self.anchor_size = (w, h)
-        return True
-
-    @property
-    def ready(self):
-        return self.anchor_desc is not None
-
-    def clear(self):
-        self.anchor_kp = self.anchor_desc = self.anchor_size = None
-
-    def search(self, gray):
-        if not self.ready:
-            return None, 0
-        kp, desc = self.orb.detectAndCompute(gray, None)
-        if desc is None or len(kp) < REACQ_MIN_MATCHES:
-            return None, 0
-        matches = self.bf.knnMatch(self.anchor_desc, desc, k=2)
-        good = [m for pair in matches if len(pair) == 2
-                for m, n in [pair] if m.distance < 0.75 * n.distance]
-        if len(good) < REACQ_MIN_MATCHES:
-            return None, len(good)
-        pts = np.array([kp[m.trainIdx].pt for m in good], np.float32)
-        cx, cy = np.median(pts[:, 0]), np.median(pts[:, 1])
-        w, h = self.anchor_size
-        return (float(cx - w / 2), float(cy - h / 2), float(w), float(h)), len(good)
-
-
-faulthandler.enable()
-
-
 class HefModel:
 
     def __init__(self, vdevice, hef_path):
@@ -1786,6 +1937,18 @@ class HefModel:
         self.im = None
 
 
+def _pair_scale(a, b):
+    if len(a) < 3:
+        return None
+    i, j = np.triu_indices(len(a), 1)
+    da = np.linalg.norm(a[i] - a[j], axis=1)
+    db = np.linalg.norm(b[i] - b[j], axis=1)
+    ok = da > 1.0
+    if not ok.any():
+        return None
+    return float(np.median(db[ok] / da[ok]))
+
+
 class SpReacquirer:
     name = "superpoint"
 
@@ -1794,6 +1957,7 @@ class SpReacquirer:
         self.bf = cv2.BFMatcher(cv2.NORM_L2)
         self.anchor_desc = None
         self.anchor_size = None
+        self.anchor_pts = None
 
     def set_anchor(self, bgr, box):
         pts, desc = self.sp.infer(bgr)
@@ -1810,6 +1974,7 @@ class SpReacquirer:
             if sel.sum() >= REACQ_MIN_MATCHES:
                 self.anchor_desc = desc[sel][:ANCHOR_MAX_KP]
                 self.anchor_size = (bw, bh)
+                self.anchor_pts = pts[sel][:ANCHOR_MAX_KP]
                 return True
         return False
 
@@ -1818,7 +1983,7 @@ class SpReacquirer:
         return self.anchor_desc is not None
 
     def clear(self):
-        self.anchor_desc = self.anchor_size = None
+        self.anchor_desc = self.anchor_size = self.anchor_pts = None
 
     def search(self, bgr):
         if not self.ready:
@@ -1840,22 +2005,22 @@ class SpReacquirer:
             return None, int(inb.sum())
         cx = np.median(mpts[inb, 0])
         cy = np.median(mpts[inb, 1])
+        apts = self.anchor_pts[[m.queryIdx for m in good]]
+        sc = _pair_scale(apts[inb], mpts[inb])
+        if sc is None:
+            sc = 1.0
+        sc = float(np.clip(sc, BOX_SCALE_MIN, BOX_SCALE_MAX))
+        w, h = w * sc, h * sc
         gx, gy = PROC_W / SP_W, PROC_H / SP_H
         return ((cx - w / 2) * gx, (cy - h / 2) * gy, w * gx, h * gy), int(inb.sum())
 
 
 def _load_models():
-    sp_model, vdev = None, None
-    try:
-        from hailo_platform import VDevice, HailoSchedulingAlgorithm
-        params = VDevice.create_params()
-        params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-        vdev = VDevice(params)
-        if os.path.exists(HEF_SUPERPOINT):
-            sp_model = SuperPointHef(HefModel(vdev, HEF_SUPERPOINT))
-    except Exception as e:
-        pass
-    return sp_model, vdev
+    from hailo_platform import VDevice, HailoSchedulingAlgorithm
+    params = VDevice.create_params()
+    params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+    vdev = VDevice(params)
+    return SuperPointHef(HefModel(vdev, HEF_SUPERPOINT)), vdev
 
 
 _running = True
@@ -1879,7 +2044,7 @@ def service_main():
     ctrl_slot = BlobSlot(SHM_CTRL)
 
     sp_model, vdev = _load_models()
-    reacq = SpReacquirer(sp_model) if sp_model else OrbReacquirer()
+    reacq = SpReacquirer(sp_model)
 
     last_fid = 0
     last_anchor_fid = -1
@@ -1908,7 +2073,7 @@ def service_main():
                 if (ab is not None and afid != last_anchor_fid
                         and fid - last_anchor_try >= 30):
                     last_anchor_try = fid
-                    src = img if reacq.name == "superpoint" else _to_proc_gray(img)
+                    src = img
                     ok_anchor = reacq.set_anchor(src, ab)
                     if ok_anchor:
                         last_anchor_fid = afid
@@ -1919,7 +2084,7 @@ def service_main():
                     last_anchor_fid = -1
 
                 if state == "REACQUIRE":
-                    src = img if reacq.name == "superpoint" else _to_proc_gray(img)
+                    src = img
                     t0 = time.perf_counter()
                     box, n = reacq.search(src)
                     result_slot.write({"kind": "reacq", "t_frame": t_cap,
@@ -1931,8 +2096,7 @@ def service_main():
                     audit_cnt += 1
                     if reacq.ready and audit_cnt >= AUDIT_EVERY:
                         audit_cnt = 0
-                        src = (img if reacq.name == "superpoint"
-                               else _to_proc_gray(img))
+                        src = img
                         sp_box, n = reacq.search(src)
                         result_slot.write({"kind": "audit", "t_frame": t_cap,
                                            "box": sp_box, "matches": n},
@@ -1967,10 +2131,6 @@ def service_main():
         ctrl_slot.close()
 
 
-def _to_proc_gray(bgr):
-    return cv2.cvtColor(cv2.resize(bgr, (PROC_W, PROC_H)), cv2.COLOR_BGR2GRAY)
-
-
 NO_HAILO = os.environ.get("NO_HAILO", "0") not in ("0", "", "false")
 DEFAULT_BOX = 48
 
@@ -1982,8 +2142,13 @@ class App:
         self.clear_req = False
         self.cmd = {"valid": False, "estop": False}
         self.sm = StateMachine()
-        self.tracker = make_tracker()
+        self.cmd_event = threading.Event()
         self.log = LatencyLog(every=int(os.environ.get("LAT_EVERY", "30")))
+        try:
+            self.tracker = make_tracker()
+        except Exception as e:
+            self.tracker = DisabledTracker()
+            self.log.event(f"TRACKER_DISABLED {type(e).__name__}: {e}")
 
     def on_track(self, cx, cy, box):
         with self.lock:
@@ -2046,20 +2211,33 @@ def fast_loop(app):
     follow = FollowPan()
 
     def view_now():
-        z, ox, oy = stab.view(zoom.value())
+        z = max(1.0, zoom.value())
+        if stab.enabled and not STAB_FREE:
+            z *= STAB_ZOOM
         fx, fy = follow.offset()
-        sx = (PROC_W - PROC_W / z) / 2.0
-        sy = (PROC_H - PROC_H / z) / 2.0
-        return (z, max(-sx, min(sx, ox + fx)),
-                max(-sy, min(sy, oy + fy)))
+        return (z, fx, fy, stab.warp)
+
+    def stab_fit(m):
+        if STAB_FREE:
+            return True
+        z, fx, fy, _ = view_now()
+        cw3 = crop_matrix(CAP_W, CAP_H, z, fx, fy)
+        inv = cv2.invertAffineTransform(
+            (cw3 @ np.vstack([m, (0.0, 0.0, 1.0)]))[:2].copy())
+        for px, py in ((0.0, 0.0), (RTSP_W, 0.0),
+                       (0.0, RTSP_H), (RTSP_W, RTSP_H)):
+            qx, qy = apply_pt(inv, px, py)
+            if qx < 1.5 or qy < 1.5 or qx > CAP_W - 1.5 or qy > CAP_H - 1.5:
+                return False
+        return True
 
     gcs = GcsLink(on_track=app.on_track, on_clear=app.on_clear,
                   on_center=app.on_center, on_zoom_rate=zoom.set_rate,
                   on_zoom_abs=zoom.set_zoom, zoom=zoom.value,
                   on_stab_mode=stab.set_mode, on_stab_alpha=stab.set_alpha,
-                  on_ai_mode=stab.set_mode,
+                  on_gain=stab.set_gain, on_ai_mode=stab.set_mode,
                   view=view_now).start()
-    fcc = FccLink(app.fcc_command).start()
+    fcc = FccLink(app.fcc_command, app.cmd_event).start()
 
     cmdf = CmdFilter()
     frame_id = 0
@@ -2075,7 +2253,8 @@ def fast_loop(app):
             bgr, proc, gray, t_cap = cam.read()
             frame_id += 1
             wdg.feed()
-            ego_d = stab.update(gray, t_cap, box)
+            stab.update(gray, stab_fit, stab.budget(), box)
+            ego_d = stab.step_d
             frame_slot.write(bgr, t_cap, frame_id)
             t0 = time.perf_counter()
 
@@ -2139,6 +2318,13 @@ def fast_loop(app):
                                                       keep_ref=True)
                                     track_ok, box = True, tuple(sp_box)
                                     app.log.event(f"SNAPBACK {sp_box}")
+                                else:
+                                    rescale = getattr(app.tracker,
+                                                      "rescale", None)
+                                    if rescale is not None:
+                                        hc = float(app.tracker.sz[1])
+                                        rescale(hc + BOX_AUDIT_LR
+                                                * (sp_box[3] - hc), proc)
                         elif (res["matches"] < max(4, REACQ_MIN_MATCHES // 2)
                               and getattr(app.tracker, "frac", 0.0)
                                   < TERM_HOLD_FRAC):
@@ -2153,6 +2339,7 @@ def fast_loop(app):
             cmd = cmdf.step(state, control_step(state, box, view_now()), box)
             with app.lock:
                 app.cmd = cmd
+            app.cmd_event.set()
             t2 = time.perf_counter()
 
             if clear:
