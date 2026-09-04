@@ -71,7 +71,7 @@ ROI_PAD = _env_float("ROI_PAD", 0.2)
 ROI_MIN_Z = _env_float("ROI_MIN_Z", 4.0)
 ROI_MAX_FILL = _env_float("ROI_MAX_FILL", 0.6)
 ROI_MAX_OTHER = _env_float("ROI_MAX_OTHER", 0.05)
-TRK_KF = os.environ.get("TRK_KF", "1") not in ("0", "", "false", "no")
+TRK_KF = os.environ.get("TRK_KF", "0") not in ("0", "", "false", "no")
 TRK_KF_ACC = _env_float("TRK_KF_ACC", 150.0)
 TRK_KF_MEAS = _env_float("TRK_KF_MEAS", 0.1)
 TRK_KF_ANISO_MAX = _env_float("TRK_KF_ANISO_MAX", 80.0)
@@ -162,6 +162,12 @@ SP_ZOOM_MAX    = _env_float("SP_ZOOM_MAX", 8.0)
 SP_STRONG_MIN_PX = _env_float("SP_STRONG_MIN_PX", 72.0)
 AUDIT_EVERY = _env_int("AUDIT_EVERY", 10)
 AUDIT_FAILS = _env_int("AUDIT_FAILS", 5)
+COLOR_REACQ = os.environ.get("COLOR_REACQ", "1") not in ("0", "", "false", "no")
+COLOR_REACQ_HTOL = _env_int("COLOR_REACQ_HTOL", 12)
+COLOR_REACQ_STOL = _env_int("COLOR_REACQ_STOL", 60)
+COLOR_REACQ_MINSAT = _env_int("COLOR_REACQ_MINSAT", 60)
+COLOR_REACQ_RADIUS = _env_float("COLOR_REACQ_RADIUS", 120.0)
+COLOR_REACQ_MIN_AREA = _env_int("COLOR_REACQ_MIN_AREA", 12)
 AUDIT_REFRESH = _env_int("AUDIT_REFRESH", 10)
 
 RTSP_ENABLE  = os.environ.get("RTSP", "1") not in ("0", "", "false")
@@ -561,6 +567,7 @@ class NanoTracker:
         self.color_d0 = 0.0
         self.ref_chroma = None
         self.ref0 = None
+        self.color_ref = None
         self.last_ms = 0.0
         self._miss = 0
         self._warmup()
@@ -611,6 +618,49 @@ class NanoTracker:
         return self._grid_at(img, float(self.pos[0]), float(self.pos[1]),
                              float(self.sz[0]), float(self.sz[1]))
 
+    @staticmethod
+    def _color_model(img, box):
+        x, y, w, h = box
+        x0, y0 = int(max(0, x)), int(max(0, y))
+        x1, y1 = int(min(img.shape[1], x + w)), int(min(img.shape[0], y + h))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return None
+        hsv = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        sel = hsv[:, :, 1] >= COLOR_REACQ_MINSAT
+        if sel.sum() < 4:
+            return None
+        h_med = float(np.median(hsv[:, :, 0][sel]))
+        return h_med
+
+    def color_find(self, img, cx, cy):
+        if self.color_ref is None:
+            return None
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        H = hsv[:, :, 0].astype(np.int16)
+        dh = np.abs(H - int(self.color_ref))
+        dh = np.minimum(dh, 180 - dh)
+        mask = ((dh <= COLOR_REACQ_HTOL) &
+                (hsv[:, :, 1] >= COLOR_REACQ_MINSAT)).astype(np.uint8) * 255
+        r = int(COLOR_REACQ_RADIUS)
+        x0, y0 = max(0, int(cx) - r), max(0, int(cy) - r)
+        x1, y1 = min(img.shape[1], int(cx) + r), min(img.shape[0], int(cy) + r)
+        roi = np.zeros_like(mask)
+        roi[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
+        roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        nc, lab, stats, cent = cv2.connectedComponentsWithStats(roi)
+        best, best_d = None, 1e18
+        for i in range(1, nc):
+            bx, by, bw, bh, area = stats[i]
+            if area < COLOR_REACQ_MIN_AREA:
+                continue
+            d = (cent[i][0] - cx) ** 2 + (cent[i][1] - cy) ** 2
+            if d < best_d:
+                best, best_d = (bx, by, bw, bh), d
+        if best is None:
+            return None
+        bx, by, bw, bh = best
+        return (float(bx), float(by), float(bw), float(bh))
+
     def matches_ref(self, img, box):
         if self.ref_chroma is None:
             return True
@@ -649,6 +699,7 @@ class NanoTracker:
         if not (keep_ref and self.ref_chroma is not None):
             self.ref_chroma = self._box_grid(img)
             self.ref0 = self.ref_chroma.copy()
+            self.color_ref = self._color_model(img, box)
         self.aspect = float(w) / float(h)
         self.sz0 = (float(w), float(h))
         self.color_d = 0.0
@@ -2663,6 +2714,7 @@ def fast_loop(app):
     snap_pending = 0
     last_result_seq = 0
     anchor_box, anchor_fid = None, -1
+    last_center = None
     rtsp_next = 0.0
     rtsp_period = 1.0 / RTSP_FPS
     prev_t_cap = time.monotonic()
@@ -2684,6 +2736,7 @@ def fast_loop(app):
                 app.tracker.stop()
                 app.sm.on_target_cleared()
                 cmdf.reset()
+                last_center = None
             if click is not None:
                 cx, cy, box = click
                 clicked = box is None
@@ -2722,6 +2775,22 @@ def fast_loop(app):
                     track_ok, box = False, None
                     app.log.event(f"KF_LOST strikes={tkf.strikes}")
             prev_t_cap = t_cap
+            if box is not None:
+                last_center = (box[0] + box[2] / 2.0, box[1] + box[3] / 2.0)
+            if (COLOR_REACQ and not app.tracker.active
+                    and app.sm.state is State.REACQUIRE
+                    and last_center is not None):
+                cbox = app.tracker.color_find(proc, last_center[0],
+                                              last_center[1])
+                if cbox is not None:
+                    app.tracker.start(proc, cbox, keep_ref=True)
+                    track_ok, box = app.tracker.update(proc)
+                    if track_ok:
+                        app.log.event(f"COLOR_REACQ {tuple(round(v) for v in cbox)}")
+                        last_center = (box[0] + box[2] / 2.0,
+                                       box[1] + box[3] / 2.0)
+                    else:
+                        app.tracker.stop()
             t1 = time.perf_counter()
 
             res, res_t, res_fid, seq = result_slot.read()
